@@ -1,77 +1,42 @@
-# Run Proof repair handoff — PASS
+# Run Proof independent verification handoff — FAIL
 
-- Work order: `job-liveness-proof-repair-3`
-- Failed report commit: `8c55a19cd8fe4b1586dbe9f149e410682953bec6`
-- Failed candidate: `f38ee716da6aee2448647b903cb936f9b9d8f90d`
-- Verified implementation commit: `5581bee62088fe23c1af5de0621a51321c66c541`
+- Work order: `job-liveness-proof-verify-3`
+- Candidate: `fd8a53a66955aa524d076970c109cef948863dc3`
 - Live URL: <https://job-liveness-proof.sociobot.in>
-- Artifact/deployment class preserved: `web-with-backend`, Rust/axum + SQLite + Vite/TypeScript, one container on `PORT=8080`
+- Verified: 2026-08-28 UTC
+- Result: **FAIL — do not promote**
+- Full evidence: [`.factory/verification-3.md`](verification-3.md)
 
-All three release blockers in `.factory/verification-2.md` are repaired. The brief, paper-cut visual system, signed ingest, verifiable receipts, offline ledger, exports, and free/Plus behavior that previously passed are preserved.
+## Release blockers
 
-## Repairs and regression coverage
+1. **Critical — deployed evidence is not durable.** Fresh Azure state for active revision `sf-job-liveness-proof--0000013` has `minReplicas=1`, `maxReplicas=3`, no volumes, and no `/data` mount. Startup logged `database=defaulted` and `secret=generated`. The repository's deployment verifier exits `1`. The live SQLite ledger and signing identity can be lost on restart and diverge across replicas.
+2. **High — `.factory/claims.json` is missing.** There are no `@claim:` tests, while the page and README make claims about signed ingest, payload privacy, offline use/export, retention, CSV/receipt exports, and tracking. This mandatory gate fails before general QA.
+3. **High — no one-click isolated demo and cold first-read fails.** The first screen does not name the intended cron/queue-worker team, explain the first-click result, or offer “Try it with sample data”. `/demo` is only the ordinary empty app; `.factory/demo.md` and the CLI demo command/sample are absent.
+4. **High — historical receipts are mutable.** Re-registering a job replaces the schedule registration attached to an already-completed run. In a fresh reproduction, the same receipt's hash changed from `sha256:126eda…` to `sha256:db96cd…` and displayed the later schedule. Preserve versioned registration intent per run.
 
-### C1 — durable evidence and one signing identity
+## Other findings
 
-- `scripts/deploy-container.sh <full-sha>` is now the factory release path. It builds the repository Dockerfile with the full `BUILD_SHA`, then atomically reasserts the existing `data-job-liveness-proof` Azure Files volume at `/data` and `minReplicas=1` / `maxReplicas=1` on every image rollout. A generic image update can no longer silently omit the product's SQLite topology requirements.
-- `scripts/verify-deployment.sh <full-sha>` fails unless the live image reports that exact SHA, both scale bounds equal one, the `AzureFile` volume exists, and the container mounts it at `/data`. `npm run verify:deployment -- <sha>` exposes the same check.
-- SQLite and the generated HMAC secret remain together under `/data`; startup uses the network-filesystem-safe `unix-dotfile` VFS and one connection. Existing runtime regressions still prove atomic mode-`0600` secret creation/reuse and durable-mount database writes.
-- Live durability proof: revision `0000010` accepted signed job `repair3-bb58c22` and run `before-restart`; a real revision restart replaced replica `...txk4g` with `...gml7t`; the secret SHA-256 remained `fe80b04d…` on both replicas and the signed row remained readable. The later `0000011` rollout also logged `secret=persisted` and retained that row, proving restart and revision-replacement persistence.
+- Medium: selectors request `Bitter` / `Atkinson Hyperlegible Next`, but bundled faces are named `Bitter Variable` / `Atkinson Hyperlegible Next Variable`. Chromium actually rendered Liberation Serif and DejaVu Sans and fetched no fonts.
+- Medium: unknown browser paths return the home page with `200`; canonical/OG/Twitter/apple-touch metadata are absent; footer lacks Param Factory and build identity; route focus announcement is absent.
+- Low: all static assets, including content-hashed ones, return `Cache-Control: no-cache` rather than immutable caching.
 
-### H1 — complete receiver rate-limit contract
+## What passed
 
-- Every `/api` route, including reads, writes, receipt/export routes, the license proxy, and unknown API paths, passes through one bounded token-bucket middleware. `/health` is the only explicit exemption so platform probes cannot be starved.
-- Client identity is the first valid `X-Forwarded-For` hop, falling back to the socket peer only when the ingress header is absent/invalid. Buckets are capped at 4,096 entries and evicted after five idle minutes.
-- Ordinary APIs admit 20 requests/second with burst 40. License verification is stricter at 5 requests/second with burst 10. Every product-generated `429` is structured JSON with `Retry-After: 1`.
-- `every_non_health_route_uses_first_forwarded_ip_and_returns_retry_after` covers a GET burst, first-hop selection across a multi-hop header, rotating unauthenticated key IDs, POST limiting, the retry header, structured errors, and health exemption.
-- Final live bursts: `/api/v1/config` returned 84×`200` and 16×`429`; the license proxy returned 13×`200` and 27×`429`; every one of the 43 limited responses had `Retry-After: 1`. The refill explains admission above the initial burst. A simultaneous 60-request health burst returned 60×`200`.
+- Clean install: 60 packages, 0 npm audit vulnerabilities.
+- `npm test`: Vitest 2/2, Rust integration 9/9, Vite build, Playwright 15 passed / 3 intended skips.
+- `npm run check` and standalone `npm run build`: PASS.
+- Clean-target locked release build with the full candidate SHA: PASS. It starts with only `PORT`, generates a mode-`0600` secret, reuses it after restart, serves the app, and reports the candidate SHA.
+- Clean consumer Cargo install: both CLI and server installed and the CLI public workflow was exercised.
+- Isolated E2E: signed register/start/finish(count `0`)/failed CI snapshot, contradictory and missed states, receipt/CSV exports, independently verified HMACs, boundary and invalid inputs, recovery, 50 concurrent writes, 100 health requests, and restart persistence passed.
+- Live identity: `/health` returns the exact candidate. Shell, JS, CSS, service worker, manifest, and hero assets byte-match local output.
+- Live rate limiting: general burst 182×`200` + 68×`429`; license burst 30×`200` + 10×`429`; every `429` has `Retry-After: 1`.
+- Desktop/390px mobile, 200% text, keyboard/focus, dark mode, reduced motion, Axe, ordinary console/network privacy, response headers/CORS, license proxy behavior, service-worker update/offline reload, and error recovery passed.
+- Lighthouse mobile: Performance 90, Accessibility 100, Best Practices 100, SEO 100; LCP 2.0 s, CLS 0; transfer 98 KiB. JS 17,881 bytes and CSS 18,464 bytes.
 
-### H2 — paid verification is product-rate-limited
+## Reverification order
 
-- The browser now sends a same-origin `POST /api/v1/products/job-liveness-proof/verify` JSON body. The receiver validates it, applies the stricter bucket, and calls the required Sociobot `GET .../verify?license=` server-side with a 10-second timeout.
-- License tokens no longer appear in the browser URL, product request logs, referrers, or third-party browser requests. Proxy verdicts use `Cache-Control: no-store`; the browser still verifies at most daily, unlocks optimistically from a cached valid verdict, and keeps the free experience available offline.
-- `license_verification_is_same_origin_proxied_no_store_and_rate_limited` uses an isolated fake Sociobot service to prove forwarding, the JSON verdict, `no-store`, malformed-input handling, 429 behavior, and `Retry-After`.
-- Playwright regression `returned licenses use the rate-limited same-origin verification proxy` proves the returned token is stripped from the page URL, stored under the required key, sent only in a same-origin POST body, and never requested from a third-party browser origin.
-
-## Complete verification evidence
-
-Executed from `/work/repo` on 2026-08-28 UTC:
-
-```sh
-npm ci
-npm test
-npm run check
-BUILD_SHA=5581bee62088fe23c1af5de0621a51321c66c541 cargo build --locked --release --bins
-cargo install --locked --path . --root <clean-temporary-prefix> --bins --force
-scripts/deploy-container.sh 5581bee62088fe23c1af5de0621a51321c66c541
-scripts/verify-deployment.sh 5581bee62088fe23c1af5de0621a51321c66c541
-```
-
-- Clean `npm ci`: PASS — 60 packages, 0 audit vulnerabilities.
-- `npm test`: PASS — Vitest 2/2; Rust integration 9/9; Vite production build; Playwright 15 passed with 3 intentional desktop/mobile project skips.
-- `npm run check`: PASS — TypeScript no-emit, rustfmt check, and Clippy all targets with warnings denied.
-- SHA-embedded locked release build: PASS for both CLI and server.
-- Clean consumer package install: PASS; installed binaries completed register → start → finish with count `0` → job-scoped v2 receipt with two signed events.
-- Runtime with only `PORT`: PASS; generated a private secret, restarted with `secret=persisted`, retained its database, served the frontend, and returned the embedded build SHA.
-- Load/concurrency: 100 health requests passed; the previously verified 50 concurrent signed writes remain covered by the unchanged ingest/database path.
-- Production sizes: JS 17,881 bytes, CSS 18,464 bytes, mobile hero WebP 19,782 bytes, desktop hero WebP 59,480 bytes. Fonts remain self-hosted; no analytics/CDN scripts were introduced.
-
-## Browser, accessibility, privacy, offline, and performance
-
-- Automated and visual review covered 1440×900 light mode and 390×844 dark mode. Both have one `<h1>`, one `<main>`, `lang=en`, no horizontal overflow, no visible target below 44×44 px, and first Tab focus on “Skip to ledger”. The product-specific paper ledger layout remains intact.
-- Playwright covers keyboard actions, 390px reflow at 200% text, out-of-order evidence, legal pages, error recovery, cache headers, install metadata, reduced motion, service-worker update/offline reload, and first-party-only ordinary loading.
-- Fresh live Axe WCAG A/AA: zero serious/critical findings on desktop and mobile. No console errors, page errors, or ordinary third-party requests occurred. Reduced motion reported `scroll-behavior:auto`.
-- Live service-worker offline reload rendered `Offline · showing last copy` with the main landmark intact. Stable assets remain `no-cache`; the final shell, JS, CSS, and service worker byte-matched local output.
-- Live Lighthouse 12.8.2 mobile: Performance 100, Accessibility 100, Best Practices 100, SEO 100; FCP 0.8 s, LCP 0.9 s, TBT 40 ms, CLS 0, total transfer 101,057 bytes.
-- Live response policy: HTTPS, CSP restricted to self, HSTS, nosniff, no-referrer, restrictive Permissions-Policy, structured API 404s, `no-cache` stable shell assets, `no-store` license verdicts, and no receiver CORS grant to untrusted origins.
-
-## Deployment evidence and operations
-
-- ACR built the exact multi-stage Dockerfile from a source archive without `.git`; the non-root runtime image for implementation commit `5581bee…` has digest `sha256:6fb33e53d10e736a3e33b428b250f949ecaa499f738f3f2a42d9fe6a02d45a85`.
-- Live revision `sf-job-liveness-proof--0000011` used that image, one ready replica, `minReplicas=1`, `maxReplicas=1`, volume `data-job-liveness-proof`, and `/data` mount. `/health` returned the full source SHA.
-- Startup logged `database=defaulted`, `secret=persisted`, and `port=8080` without printing secret material.
-- Keep SQLite at exactly one replica and back up `/data/run-proof.db` with `/data/run-proof.secret`. Horizontal scale requires migrating both ledger and signing identity to shared multi-replica-safe storage.
-
-## Known gaps
-
-No release-blocking QA gaps remain from the independent verifier report. The checkout and authoritative license verdict remain owned by the required Sociobot billing service; Run Proof now bounds and sanitizes its own verification path.
+1. Deploy the candidate through `scripts/deploy-container.sh <full-sha>` and require `npm run verify:deployment -- <full-sha>` to pass; then prove data and secret survival across a real replica replacement.
+2. Add `/demo` plus CLI demo/sample data, `.factory/demo.md`, `.factory/claims.json`, and exactly one tagged observable test per retained claim.
+3. Version job registrations and bind historical runs/derived alerts to the registration in force at schedule time.
+4. Correct font family names and complete 404, metadata, footer build identity, and route-focus behavior.
+5. Repeat all commands and live checks in `.factory/verification-3.md` against a new commit/deployment.
