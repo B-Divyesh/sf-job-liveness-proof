@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://job-liveness-proof.sociobot.in/sitemap.xml

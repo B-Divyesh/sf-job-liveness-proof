@@ -1,0 +1,96 @@
+import '@fontsource-variable/bitter/wght.css';
+import '@fontsource-variable/atkinson-hyperlegible-next/wght.css';
+import './styles.css';
+import { contradictionLabel, filterRows, states, type Ledger, type LedgerRow } from './model';
+
+const app = document.querySelector<HTMLDivElement>('#app')!;
+const slug = 'job-liveness-proof';
+const billingBase = 'https://api.sociobot.in';
+const licenseKey = `sb_license:${slug}`;
+const cacheKey = 'run-proof:last-ledger';
+let ledger: Ledger | null = null;
+let selectedState = 'all';
+let query = '';
+let offline = false;
+
+const icon = `<svg aria-hidden="true" viewBox="0 0 48 48"><path d="M8 7h26l6 6v28H8z"/><path d="M34 7v7h7M15 22h18M15 29h12"/><circle cx="34" cy="33" r="8"/><path d="m30 33 3 3 6-7"/></svg>`;
+
+function esc(value: unknown): string { return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]!)); }
+function formatTime(value: string | null): string { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? 'Unknown' : new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(date); }
+function relative(value: string): string { const seconds = Math.round((new Date(value).valueOf()-Date.now())/1000); const abs=Math.abs(seconds); const [n,unit]=abs<60?[abs,'second']:abs<3600?[Math.round(abs/60),'minute']:abs<86400?[Math.round(abs/3600),'hour']:[Math.round(abs/86400),'day']; return new Intl.RelativeTimeFormat(undefined,{numeric:'auto'}).format(seconds<0?-Number(n):Number(n),unit as Intl.RelativeTimeFormatUnit); }
+
+function shell(content: string): string { return `<header class="masthead"><a class="brand" href="/" aria-label="Run Proof home">${icon}<span>Run Proof</span></a><nav aria-label="Primary"><a href="/#ledger">Ledger</a><a href="/#setup">Set up</a><a href="/#plus">Plus</a></nav></header>${content}<footer><span>Run Proof · evidence, not payloads</span><span><a href="/privacy">Privacy</a><a href="/terms">Terms</a><span>Original AI-assisted paper artwork</span></span></footer>`; }
+
+function legalPage(kind:'privacy'|'terms') {
+  document.title=`${kind==='privacy'?'Privacy':'Terms'} — Run Proof`;
+  const privacy = `<h1>Privacy</h1><p class="lede">Run Proof is designed to retain execution evidence, not the contents of your jobs.</p><h2>Data this server stores</h2><p>Job names and keys, run identifiers, schedule/start/finish times, terminal status, completion counts, CI check observations, source links, and request signatures. Ingest schemas reject unknown fields so job payloads are not silently retained.</p><h2>Where it lives</h2><p>Your self-hosted SQLite database. This app includes no analytics, advertising, tracking pixel, or third-party runtime script. Browser storage keeps the most recent ledger for offline reading and, if supplied, your Sociobot license token.</p><h2>Control and deletion</h2><p>The operator chooses retention with <code>RETENTION_DAYS</code>. Expired evidence is removed locally on server start. Clear this origin’s site data to remove the offline cache and license from your browser.</p><h2>Purchase verification</h2><p>When you activate Plus, the browser sends the license token to Sociobot’s verification API at most once per day. Sociobot/Dodo acts as merchant of record. Run Proof does not receive card details.</p>`;
+  const terms = `<h1>Terms</h1><p class="lede">Run Proof records signals supplied by your systems. It helps investigate work; it does not execute or guarantee that work.</p><h2>Use and responsibility</h2><p>You are responsible for safeguarding the signing secret, choosing appropriate schedules and grace periods, backing up SQLite, and deciding how evidence informs operational action. Verify clocks on senders and receiver.</p><h2>One-time purchase</h2><p>Run Proof Plus is a one-time $29 license for saved views and extended-retention controls in one self-hosted deployment. Sociobot/Dodo is the merchant of record and handles payment and refunds. A refunded or revoked license stops unlocking Plus features; core ingest and exports remain available.</p><h2>No warranty</h2><p>The software is provided “as is,” without warranty. It is not an alert router, queue processor, CI replacement, or sole safety control. The MIT license governs the source code.</p>`;
+  app.innerHTML=shell(`<main id="main" class="legal"><a class="back" href="/">← Back to the ledger</a>${kind==='privacy'?privacy:terms}<p class="updated">Effective 28 August 2026</p></main>`);
+}
+
+function renderApp() {
+  app.innerHTML=shell(`<main id="main">
+    <section class="hero" aria-labelledby="page-title"><div class="hero-copy"><p class="eyebrow"><span></span>Signed execution evidence</p><h1 id="page-title">Know the job ran.<br><em>Keep the proof.</em></h1><p class="lede">A compact, self-hosted ledger for the gap between “the check is green” and “the work actually finished.”</p><div class="hero-actions"><a class="button primary" href="#setup">Connect a job</a><a class="button secondary" href="#ledger">Read the ledger</a></div><ul class="trust-line"><li>HMAC signed</li><li>No payloads</li><li>Offline export</li></ul></div>
+      <figure><picture><source media="(max-width: 640px)" srcset="/assets/run-proof-diorama-720.webp"><img src="/assets/run-proof-diorama.webp" width="1280" height="853" alt="Paper-cut schedule ticket passing through a worker press and emerging with a proof stamp" fetchpriority="high" decoding="async"></picture><figcaption>Intent enters. Evidence comes out.</figcaption></figure>
+    </section>
+    <section id="ledger" class="ledger-section" aria-labelledby="ledger-title"><div class="section-heading"><div><p class="kicker">Current evidence</p><h2 id="ledger-title">Run ledger</h2></div><div class="connection" id="connection"><span></span>Checking receiver…</div></div>
+      <div id="summary" class="summary" aria-label="Run status summary"></div>
+      <div class="toolbar"><div class="filters" id="filters" aria-label="Filter ledger by status"></div><label class="search"><span class="visually-hidden">Search jobs and run IDs</span><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="search" type="search" placeholder="Search jobs or run IDs"></label><button class="save-view" id="save-view" type="button" hidden>Save view</button><button class="button export" id="export" type="button">Export ledger</button></div>
+      <div id="notice" class="notice" role="status" aria-live="polite"></div><div id="ledger-content" aria-live="polite" aria-busy="true"><div class="loading-paper"><span></span><span></span><span></span><p>Reading signed receipts…</p></div></div>
+    </section>
+    <section id="setup" class="setup" aria-labelledby="setup-title"><div><p class="kicker">Three signed moves</p><h2 id="setup-title">Connect one recurring job</h2><p>Register its schedule once, then bracket each run with start and finish receipts. Import the CI view when you need to compare claims.</p><ol><li><strong>Register intent</strong><span>Name the cadence and grace window.</span></li><li><strong>Bracket the work</strong><span>Send start and finish with the same run ID.</span></li><li><strong>Compare the source</strong><span>Attach a CI snapshot to expose contradictions.</span></li></ol></div><div class="code-slip"><div><span>Shell</span><button id="copy-code" type="button">Copy</button></div><pre tabindex="0" aria-label="Command line setup example"><code id="setup-code">export RUN_PROOF_URL=https://proof.example.com
+export RUN_PROOF_SECRET=&lt;your-32+-character-secret&gt;
+
+run-proof register billing-sweep \\
+  --name "Billing sweep" --every 3600 --grace 300
+
+RUN_ID="billing-$(date +%s)"
+run-proof start billing-sweep "$RUN_ID" \\
+  --scheduled "$(date -u +%FT%TZ)"
+
+# ...perform the work...
+run-proof finish billing-sweep "$RUN_ID" \\
+  --status success --count 428</code></pre></div></section>
+    <section id="plus" class="plus" aria-labelledby="plus-title"><div class="plus-stamp" aria-hidden="true">PLUS</div><div><p class="kicker">Support the record</p><h2 id="plus-title">Longer memory, one purchase</h2><p>Run Proof Free includes signed ingest, contradiction detection, and every export. Plus unlocks saved views and extended-retention controls for one self-hosted deployment.</p><div class="price"><strong>$29</strong><span>one time</span></div><div class="plus-actions"><a class="button primary" href="https://api.sociobot.in/api/v1/products/job-liveness-proof/checkout" rel="external">Buy Run Proof Plus</a><button class="button secondary" id="restore-toggle" type="button">Restore purchase</button></div><form id="restore" class="restore" hidden><label for="license">License token</label><div><input id="license" autocomplete="off" spellcheck="false"><button class="button primary" type="submit">Verify license</button></div><p id="license-status" role="status" aria-live="polite"></p></form><p class="fine">Sociobot/Dodo is the merchant of record. Refunds are handled there. <a href="/terms">Terms apply.</a></p></div></section>
+  </main>`);
+  bindEvents(); void loadLedger(); void initialiseLicense();
+}
+
+function bindEvents(){
+  document.querySelector('#search')?.addEventListener('input',event=>{query=(event.target as HTMLInputElement).value;renderRows();});
+  document.querySelector('#export')?.addEventListener('click',exportLedger);
+  document.querySelector('#save-view')?.addEventListener('click',()=>{localStorage.setItem('run-proof:plus-view',JSON.stringify({selectedState,query}));showNotice('This view is saved on this device.','success');});
+  document.querySelector('#copy-code')?.addEventListener('click',async event=>{const button=event.currentTarget as HTMLButtonElement;try{await navigator.clipboard.writeText(document.querySelector('#setup-code')?.textContent??'');button.textContent='Copied';setTimeout(()=>button.textContent='Copy',1800);}catch{button.textContent='Select code to copy';}});
+  document.querySelector('#restore-toggle')?.addEventListener('click',()=>{const form=document.querySelector<HTMLFormElement>('#restore')!;form.hidden=!form.hidden;if(!form.hidden)document.querySelector<HTMLInputElement>('#license')?.focus();});
+  document.querySelector('#restore')?.addEventListener('submit',event=>{event.preventDefault();const token=document.querySelector<HTMLInputElement>('#license')!.value.trim();if(token){localStorage.setItem(licenseKey,token);void verifyLicense(token,true);}});
+}
+
+async function loadLedger(){
+  const content=document.querySelector('#ledger-content')!; const connection=document.querySelector('#connection')!;
+  try{const response=await fetch('/api/v1/ledger',{headers:{accept:'application/json'}});if(!response.ok)throw new Error(`Receiver returned ${response.status}`);ledger=await response.json() as Ledger;localStorage.setItem(cacheKey,JSON.stringify(ledger));offline=false;connection.innerHTML='<span></span>Receiver connected';connection.className='connection online';}
+  catch(error){const cached=localStorage.getItem(cacheKey);if(cached){ledger=JSON.parse(cached) as Ledger;offline=true;connection.innerHTML='<span></span>Offline · showing last copy';connection.className='connection offline';showNotice('The receiver is unavailable. This is the last ledger saved on this device; export still works.','warning');}else{content.innerHTML=`<div class="state-panel error"><div class="state-icon">!</div><h3>Could not reach the ledger</h3><p>${esc(error instanceof Error?error.message:'Check the receiver and try again.')}</p><button class="button primary" id="retry" type="button">Try again</button></div>`;content.setAttribute('aria-busy','false');document.querySelector('#retry')?.addEventListener('click',()=>void loadLedger());return;}}
+  renderSummary();renderFilters();renderRows();content.setAttribute('aria-busy','false');
+}
+
+function renderSummary(){const summary=document.querySelector('#summary')!;const priority=['contradictory','missed','late','completed'] as const;summary.innerHTML=priority.map(state=>`<button class="summary-slip ${state}" data-state="${state}" type="button"><span>${state==='contradictory'?'!':state==='missed'?'×':state==='late'?'◷':'✓'}</span><strong>${ledger?.summary[state]??0}</strong><small>${state}</small></button>`).join('');summary.querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>{selectedState=(button as HTMLElement).dataset.state!;renderFilters();renderRows();document.querySelector('#ledger-title')?.scrollIntoView({behavior:'smooth'});}));}
+function renderFilters(){const filters=document.querySelector('#filters')!;filters.innerHTML=['all',...states].map(state=>`<button type="button" data-state="${state}" aria-pressed="${selectedState===state}">${esc(state)}</button>`).join('');filters.querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>{selectedState=(button as HTMLElement).dataset.state!;renderFilters();renderRows();}));}
+
+function renderRows(){const content=document.querySelector('#ledger-content')!;const rows=filterRows(ledger?.rows??[],selectedState,query);if(!ledger?.rows.length){content.innerHTML=`<div class="state-panel empty"><div class="empty-art" aria-hidden="true"><span></span><span></span><span></span></div><h3>The ledger is ready</h3><p>Register a job and send its first signed start receipt. Run Proof will learn its cadence from there.</p><a class="button primary" href="#setup">Connect the first job</a></div>`;return;}if(!rows.length){content.innerHTML=`<div class="state-panel"><h3>No receipts match</h3><p>Clear the status filter or search to see the full record.</p><button class="button secondary" id="clear-filter" type="button">Clear filters</button></div>`;document.querySelector('#clear-filter')?.addEventListener('click',()=>{selectedState='all';query='';(document.querySelector('#search') as HTMLInputElement).value='';renderFilters();renderRows();});return;}
+  content.innerHTML=`<div class="table-wrap"><table><thead><tr><th>Run</th><th>Schedule</th><th>Evidence</th><th>Source view</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody>${rows.map(rowTemplate).join('')}</tbody></table></div>`;
+  content.querySelectorAll<HTMLButtonElement>('[data-receipt]').forEach(button=>button.addEventListener('click',()=>void downloadReceipt(button.dataset.receipt!,button)));
+}
+
+function rowTemplate(row:LedgerRow){const label=contradictionLabel(row);return `<tr class="row-${esc(row.state)}"><td data-label="Run"><strong>${esc(row.display_name)}</strong><code>${esc(row.run_id)}</code></td><td data-label="Schedule"><time datetime="${esc(row.scheduled_at)}">${esc(formatTime(row.scheduled_at))}</time><small>${esc(relative(row.scheduled_at))}</small></td><td data-label="Evidence"><span>${row.started_at?'Started':'No start'}</span><span>${row.finished_at?`Finished${row.completion_count!==null?` · ${row.completion_count.toLocaleString()} items`:''}`:'No finish'}</span></td><td data-label="Source view">${row.source?`${row.source_url?`<a href="${esc(row.source_url)}" target="_blank" rel="noreferrer">${esc(row.source)} ↗</a>`:`<span>${esc(row.source)}</span>`}<small>${esc(row.observed_status)}</small>`:'<span class="muted">Not imported</span>'}</td><td data-label="Status"><span class="status ${esc(row.state)}"><i aria-hidden="true"></i>${esc(label)}</span></td><td class="action-cell"><button class="receipt-button" type="button" data-receipt="${esc(row.run_id)}" aria-label="Export ${row.is_virtual?'derived ':''}receipt for ${esc(row.display_name)}">${row.is_virtual?'Derived receipt':'Receipt'} ↓</button></td></tr>`;}
+
+async function downloadReceipt(runId:string,button:HTMLButtonElement){button.disabled=true;button.textContent='Preparing…';try{const response=await fetch(`/api/v1/runs/${encodeURIComponent(runId)}/receipt`);if(!response.ok)throw new Error('Receipt is not available');download(await response.blob(),`run-proof-${safeName(runId)}.json`);showNotice('Receipt exported with signatures and verification notes.','success');}catch(error){showNotice(error instanceof Error?error.message:'Could not export this receipt.','error');}finally{button.disabled=false;button.textContent='Receipt ↓';}}
+function exportLedger(){if(offline&&ledger){download(new Blob([JSON.stringify(ledger,null,2)],{type:'application/json'}),'run-proof-offline-ledger.json');showNotice('Offline ledger copy exported as JSON.','success');}else{location.href='/api/v1/exports/ledger.csv';}}
+function download(blob:Blob,name:string){const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function safeName(value:string){return value.replace(/[^a-z0-9_.-]/gi,'-').slice(0,80);}
+function showNotice(message:string,type:string){const node=document.querySelector('#notice');if(node){node.textContent=message;node.className=`notice visible ${type}`;}}
+
+async function initialiseLicense(){const params=new URLSearchParams(location.search);const returned=params.get('license');if(returned){localStorage.setItem(licenseKey,returned);params.delete('license');history.replaceState({},'',`${location.pathname}${params.size?`?${params}`:''}${location.hash}`);}const token=returned??localStorage.getItem(licenseKey);if(!token)return;const cache=localStorage.getItem(`${licenseKey}:verdict`);if(cache){const parsed=JSON.parse(cache) as {valid:boolean;checked_at:number};if(parsed.valid)markUnlocked();if(Date.now()-parsed.checked_at<86_400_000)return;}await verifyLicense(token,false);}
+async function verifyLicense(token:string,announce:boolean){const status=document.querySelector('#license-status');if(status&&announce)status.textContent='Checking license…';try{const response=await fetch(`${billingBase}/api/v1/products/${slug}/verify?license=${encodeURIComponent(token)}`);const verdict=await response.json() as {valid:boolean;reason:string};localStorage.setItem(`${licenseKey}:verdict`,JSON.stringify({...verdict,checked_at:Date.now()}));if(verdict.valid){markUnlocked();if(status)status.textContent='Plus is active on this device.';}else{if(status)status.textContent='This license is no longer active. You can purchase a new license above.';}}catch{if(status&&announce)status.textContent='Could not verify right now. A previously verified license will keep working offline.';}}
+function markUnlocked(){document.querySelector('#plus')?.classList.add('unlocked');const stamp=document.querySelector('.plus-stamp');if(stamp)stamp.textContent='ACTIVE';const button=document.querySelector<HTMLButtonElement>('#save-view');if(button)button.hidden=false;const saved=localStorage.getItem('run-proof:plus-view');if(saved){const view=JSON.parse(saved) as {selectedState:string;query:string};selectedState=view.selectedState||'all';query=view.query||'';const search=document.querySelector<HTMLInputElement>('#search');if(search)search.value=query;renderFilters();renderRows();}}
+
+const route=location.pathname.replace(/\/$/,'');if(route==='/privacy'||route==='/terms')legalPage(route.slice(1) as 'privacy'|'terms');else renderApp();
+if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>undefined));
