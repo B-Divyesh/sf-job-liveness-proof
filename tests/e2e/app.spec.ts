@@ -35,3 +35,24 @@ test('390px layout has no horizontal overflow', async ({ page }, testInfo) => {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
 });
+
+test('offline reload uses the cached shell and last ledger', async ({ page, context }) => {
+  await page.goto('/');
+  await expect(page.locator('.connection')).toContainText('Receiver connected');
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.reload();
+  await expect(page.locator('.connection')).toContainText('Receiver connected');
+  await context.setOffline(true);
+  await page.reload();
+  await expect(page.locator('.connection')).toContainText('Offline · showing last copy');
+  await expect(page.getByRole('main')).toBeVisible();
+  await context.setOffline(false);
+});
+
+test('privacy page makes no third-party requests', async ({ page }) => {
+  const external: string[] = [];
+  page.on('request', request => { if (new URL(request.url()).origin !== 'http://127.0.0.1:4179') external.push(request.url()); });
+  await page.goto('/privacy');
+  await expect(page.getByRole('heading', { name: 'Privacy' })).toBeVisible();
+  expect(external).toEqual([]);
+});

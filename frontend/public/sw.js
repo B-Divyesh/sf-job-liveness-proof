@@ -1,5 +1,5 @@
-const CACHE='run-proof-shell-v1';
-const SHELL=['/','/assets/run-proof-diorama-720.webp','/assets/run-proof-diorama.webp'];
+const CACHE='run-proof-shell-v2';
+const SHELL=['/','/assets/app.js','/assets/app.css','/assets/run-proof-diorama-720.webp','/assets/run-proof-diorama.webp'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',event=>{

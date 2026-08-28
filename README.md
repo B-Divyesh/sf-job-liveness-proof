@@ -19,8 +19,6 @@ Prerequisites: Node 22+, Rust 1.88+, and SQLite development libraries.
 ```sh
 npm ci
 npm run build
-export RUN_PROOF_SECRET='replace-with-at-least-32-random-characters'
-export DATABASE_URL='sqlite://run-proof.db?mode=rwc'
 cargo run --bin run-proof-server
 ```
 
@@ -49,11 +47,10 @@ The CLI signs `unix_timestamp + "." + exact_JSON_body` with HMAC-SHA256 and send
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port |
 | `DATABASE_URL` | `sqlite://run-proof.db?mode=rwc` | SQLite URL; mount its directory persistently |
-| `RUN_PROOF_SECRET` | required | Shared signing secret, minimum 32 characters |
+| `RUN_PROOF_SECRET` | generated and persisted | Shared signing secret, minimum 32 characters; generated with the OS CSPRNG on first boot when unset |
 | `RUN_PROOF_KEY_ID` | `default` | Public key identifier expected from senders |
 | `RETENTION_DAYS` | `30` | Evidence retention, 1–3650 days; cleanup runs at startup |
 | `CLOCK_SKEW_SECONDS` | `300` | Accepted clock difference, 30–3600 seconds |
-| `BUILD_SHA` | `development` | Revision returned by `/health` |
 | `RUST_LOG` | receiver defaults | `tracing` filter for JSON logs |
 
 Back up SQLite before upgrades. Rotate a compromised secret on the receiver and all senders together. Run behind TLS in production.
@@ -64,7 +61,7 @@ Back up SQLite before upgrades. Rotate a compromised secret on the receiver and 
 npm test              # web + Rust tests
 npm run build         # reproducible frontend output in dist/
 npm run check         # TypeScript + clippy
-docker build -t run-proof .
+docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t run-proof .
 RUN_PROOF_URL=http://localhost:8080 ./scripts/load-smoke.sh
 ```
 
@@ -74,12 +71,10 @@ The load smoke sends 100 concurrent health requests. Integration tests cover a f
 
 ```sh
 docker run --rm -p 8080:8080 \
-  -e RUN_PROOF_SECRET='replace-with-at-least-32-random-characters' \
-  -e BUILD_SHA="$(git rev-parse --short HEAD)" \
   -v run-proof-data:/data run-proof
 ```
 
-The image runs as UID/GID `10001`, serves frontend and API on `PORT`, and stores SQLite under `/data`. The factory owns infrastructure, DNS, TLS, and product registration.
+The image runs as UID/GID `10001`, starts with only `PORT` (default `8080`), serves frontend and API on `0.0.0.0:$PORT`, and stores SQLite plus a generated signing secret under `/data`. Build it with the full commit SHA command above so `/health` reports the deployed commit. The factory owns infrastructure, DNS, TLS, and product registration.
 
 ## Privacy, purchases, and license
 

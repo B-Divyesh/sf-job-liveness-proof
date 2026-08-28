@@ -1,3 +1,5 @@
+ARG BUILD_SHA=development
+
 FROM node:22-alpine AS frontend
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json vite.config.ts ./
@@ -5,6 +7,8 @@ COPY frontend ./frontend
 RUN npm ci && npm run build
 
 FROM rust:1.88-bookworm AS backend
+ARG BUILD_SHA
+ENV BUILD_SHA=${BUILD_SHA}
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
@@ -20,7 +24,6 @@ COPY --from=backend /build/target/release/run-proof-server /usr/local/bin/run-pr
 COPY --from=backend /build/target/release/run-proof /usr/local/bin/run-proof
 COPY --from=frontend /build/dist ./dist
 USER 10001:10001
-ENV PORT=8080 DATABASE_URL="sqlite:///data/run-proof.db?mode=rwc" RETENTION_DAYS=30 CLOCK_SKEW_SECONDS=300
 EXPOSE 8080
 VOLUME ["/data"]
 ENTRYPOINT ["run-proof-server"]

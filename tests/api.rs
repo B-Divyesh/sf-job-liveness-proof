@@ -5,6 +5,7 @@ use http_body_util::BodyExt;
 use run_proof::{connect,router,AppState};
 use serde_json::{json,Value};
 use sha2::Sha256;
+use std::{fs, net::TcpListener, process::{Child, Command}, time::{Duration as StdDuration, SystemTime, UNIX_EPOCH}};
 use tower::ServiceExt;
 
 const SECRET:&str="test-secret-that-is-at-least-thirty-two-characters";
@@ -56,4 +57,46 @@ async fn invalid_signature_and_unknown_payload_are_rejected(){
 async fn health_exposes_build_sha(){
     let body=json(app().await.oneshot(Request::get("/health").body(Body::empty()).unwrap()).await.unwrap()).await;
     assert_eq!(body["build_sha"],"test-sha");
+}
+
+fn start_with_only_port(workdir: &std::path::Path, port: u16) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_run-proof-server"))
+        .current_dir(workdir)
+        .env_clear()
+        .env("PORT", port.to_string())
+        .spawn()
+        .expect("start receiver with only PORT")
+}
+
+async fn wait_for_ready(port: u16) -> reqwest::Response {
+    let url = format!("http://127.0.0.1:{port}/health");
+    for _ in 0..50 {
+        if let Ok(response) = reqwest::get(&url).await { return response; }
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+    }
+    panic!("receiver did not become ready at {url}");
+}
+
+#[tokio::test]
+async fn server_starts_and_serves_with_only_port() {
+    let workdir=std::env::temp_dir().join(format!("run-proof-port-only-{}",SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    fs::create_dir_all(workdir.join("dist")).unwrap();
+    fs::write(workdir.join("dist/index.html"),"<!doctype html><title>Run Proof</title><main>Run Proof</main>").unwrap();
+    let port=TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut child=start_with_only_port(&workdir,port);
+    let health=wait_for_ready(port).await;
+    assert_eq!(health.status(),StatusCode::OK);
+    assert_eq!(health.json::<Value>().await.unwrap()["status"],"ok");
+    let home=reqwest::get(format!("http://127.0.0.1:{port}/")).await.unwrap();
+    assert_eq!(home.status(),StatusCode::OK);
+    assert!(home.text().await.unwrap().contains("Run Proof"));
+    let secret=fs::read_to_string(workdir.join("run-proof.secret")).unwrap();
+    assert!(secret.trim().len() >= 32);
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; assert_eq!(fs::metadata(workdir.join("run-proof.secret")).unwrap().permissions().mode() & 0o777,0o600); }
+    child.kill().unwrap(); child.wait().unwrap();
+    let mut restarted=start_with_only_port(&workdir,port);
+    assert_eq!(wait_for_ready(port).await.status(),StatusCode::OK);
+    restarted.kill().unwrap(); restarted.wait().unwrap();
+    fs::remove_dir_all(workdir).unwrap();
 }
