@@ -38,7 +38,7 @@ patch="$(jq \
       | .image=$image
       | .env=[{"name":"PORT","value":"8080"}]
       | .volumeMounts=[{"mountPath":"/data","volumeName":"run-proof-data"}])],
-    scale:(.properties.template.scale | .minReplicas=1 | .maxReplicas=1 | .rules=null),
+    scale:{"minReplicas":1,"maxReplicas":1,"rules":null},
     volumes:[{"name":"run-proof-data","storageName":$storage,"storageType":"AzureFile"}]
   }}}' <<<"$current")"
 

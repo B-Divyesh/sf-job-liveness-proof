@@ -46,7 +46,7 @@ pub struct AppState {
     pub key_id: Arc<String>,
     pub retention_days: i64,
     pub clock_skew_seconds: i64,
-    limiter: Arc<Mutex<HashMap<IpAddr, RateBucket>>>,
+    limiter: Arc<Mutex<HashMap<(IpAddr, bool), RateBucket>>>,
     billing_client: reqwest::Client,
     billing_base: Arc<String>,
     pub build_sha: Arc<String>,
@@ -220,24 +220,30 @@ async fn request_rate_limit(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    const RATE_PER_SECOND: f64 = 20.0;
-    const BURST: f64 = 40.0;
     const IDLE_TTL: StdDuration = StdDuration::from_secs(300);
     const MAX_SOURCES: usize = 4096;
     let source = client_ip(request.headers(), connect);
+    let is_license_verification =
+        request.uri().path() == "/api/v1/products/job-liveness-proof/verify";
+    let (rate_per_second, burst) = if is_license_verification {
+        (5.0, 10.0)
+    } else {
+        (20.0, 40.0)
+    };
+    let bucket_key = (source, is_license_verification);
     {
         let now = Instant::now();
         let mut map = state.limiter.lock().expect("rate limiter lock");
         map.retain(|_, bucket| now.duration_since(bucket.updated) <= IDLE_TTL);
-        if !map.contains_key(&source) && map.len() >= MAX_SOURCES {
+        if !map.contains_key(&bucket_key) && map.len() >= MAX_SOURCES {
             return too_many_requests();
         }
-        let bucket = map.entry(source).or_insert(RateBucket {
+        let bucket = map.entry(bucket_key).or_insert(RateBucket {
             updated: now,
-            tokens: BURST,
+            tokens: burst,
         });
-        let replenished = now.duration_since(bucket.updated).as_secs_f64() * RATE_PER_SECOND;
-        bucket.tokens = (bucket.tokens + replenished).min(BURST);
+        let replenished = now.duration_since(bucket.updated).as_secs_f64() * rate_per_second;
+        bucket.tokens = (bucket.tokens + replenished).min(burst);
         bucket.updated = now;
         if bucket.tokens < 1.0 {
             return too_many_requests();
