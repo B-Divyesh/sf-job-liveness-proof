@@ -1,6 +1,6 @@
 export type RunState = 'completed' | 'running' | 'late' | 'missed' | 'failed' | 'contradictory';
 export interface LedgerRow {
-  job_key: string; display_name: string; run_id: string; scheduled_at: string;
+  job_key: string; display_name: string; run_id: string; scheduled_at: string | null;
   started_at: string | null; finished_at: string | null; completion_count: number | null;
   state: RunState; source: string | null; observed_status: string | null;
   source_url: string | null; observed_at: string | null; receipt_hash: string | null; is_virtual: boolean;

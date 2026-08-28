@@ -31,6 +31,7 @@ New ledger rows enter with a 180 ms downward paper-settle using only opacity and
 
 - `assets/src/run-proof-diorama.png`: original generated hero still showing a paper scheduler, worker path, and stamped receipt on a green cutting mat. Generated 2026-08-28 with the factory Azure image deployment, then reviewed and optimized to responsive WebP/AVIF. It is explanatory artwork, not evidence or a product screenshot.
 - Hand-authored SVG marks in the UI use simple ticket, clock, check, and contradiction geometry; they are original to this product.
+- The 192 px and 512 px PWA icons are raster exports of the hand-authored receipt/check favicon; no new generated source or third-party asset was introduced.
 - Fonts are redistributed under the SIL Open Font License and self-hosted; no runtime font or script CDN.
 
 ### Prompt sheet

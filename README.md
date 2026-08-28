@@ -39,7 +39,7 @@ run-proof snapshot billing-sweep billing-1700000000 \
   --source 'GitHub Actions' --status failed --source-url 'https://github.com/example/actions/runs/1'
 ```
 
-The CLI signs `unix_timestamp + "." + exact_JSON_body` with HMAC-SHA256 and sends `X-Run-Proof-Key`, `X-Run-Proof-Timestamp`, and `X-Run-Proof-Signature: v1=<hex>`. Duplicate start/finish events return `409`; timestamps outside `CLOCK_SKEW_SECONDS` return `400`.
+The CLI signs `unix_timestamp + "." + exact_JSON_body` with HMAC-SHA256 and sends `X-Run-Proof-Key`, `X-Run-Proof-Timestamp`, and `X-Run-Proof-Signature: v1=<hex>`. Run receipts are scoped by both job and run (`/api/v1/jobs/:job_key/runs/:run_id/receipt`) and retain those exact signed bytes, timestamp, key ID, and signature so the HMAC can be independently recomputed. Duplicate start/finish events return `409`; timestamps outside `CLOCK_SKEW_SECONDS` return `400`.
 
 ## Configuration
 
@@ -53,7 +53,7 @@ The CLI signs `unix_timestamp + "." + exact_JSON_body` with HMAC-SHA256 and send
 | `CLOCK_SKEW_SECONDS` | `300` | Accepted clock difference, 30–3600 seconds |
 | `RUST_LOG` | receiver defaults | `tracing` filter for JSON logs |
 
-Back up SQLite before upgrades. Rotate a compromised secret on the receiver and all senders together. Run behind TLS in production.
+Back up SQLite before upgrades. Rotate a compromised secret on the receiver and all senders together. Run behind TLS in production. Production must mount the database directory durably. Because SQLite is a single-node datastore, run exactly one application replica; use PostgreSQL instead before scaling horizontally.
 
 ## Test and build
 
@@ -74,7 +74,7 @@ docker run --rm -p 8080:8080 \
   -v run-proof-data:/data run-proof
 ```
 
-The image runs as UID/GID `10001`, starts with only `PORT` (default `8080`), serves frontend and API on `0.0.0.0:$PORT`, and stores SQLite plus a generated signing secret under `/data`. Build it with the full commit SHA command above so `/health` reports the deployed commit. The factory owns infrastructure, DNS, TLS, and product registration.
+The image runs as UID/GID `10001`, starts with only `PORT` (default `8080`), serves frontend and API on `0.0.0.0:$PORT`, and stores SQLite plus a generated signing secret under `/data`. Mount `/data` on durable storage and keep the deployment at one replica; the generated secret is atomically created and reused across restarts and rolling revisions. Build it with the full commit SHA command above so `/health` reports the deployed commit. The factory owns infrastructure, DNS, TLS, and product registration.
 
 ## Privacy, purchases, and license
 

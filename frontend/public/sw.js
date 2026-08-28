@@ -1,6 +1,6 @@
-const CACHE='run-proof-shell-v2';
+const CACHE='run-proof-shell-v3';
 const SHELL=['/','/assets/app.js','/assets/app.css','/assets/run-proof-diorama-720.webp','/assets/run-proof-diorama.webp'];
-self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
+self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>Promise.all(SHELL.map(async url=>{const response=await fetch(url,{cache:'reload'});if(!response.ok)throw new Error(`Could not refresh ${url}`);await cache.put(url,response);}))).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',event=>{
   const request=event.request;
