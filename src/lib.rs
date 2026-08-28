@@ -84,7 +84,8 @@ impl IntoResponse for ApiError {
 }
 
 pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
-    let connections = if database_url.contains(":memory:") {
+    let durable_network_mount = database_url.contains("/data/");
+    let connections = if database_url.contains(":memory:") || durable_network_mount {
         1
     } else {
         8
@@ -92,7 +93,7 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     // SQLite WAL relies on shared-memory primitives that network file systems do
     // not provide. The container's durable /data mount therefore uses the
     // rollback journal; local disks retain WAL's better write concurrency.
-    let journal_mode = if database_url.contains("/data/") {
+    let journal_mode = if durable_network_mount {
         SqliteJournalMode::Delete
     } else {
         SqliteJournalMode::Wal
