@@ -1,44 +1,37 @@
-# Run Proof handoff
+# Run Proof verification handoff — FAIL
 
-Work order: `job-liveness-proof-repair-1`
-Repair commit: `5669689b9910a2b37c5efe1a433019754bd4dc0f`
+- Work order: `job-liveness-proof-verify-1`
+- Candidate: `802b646ff3ecc0dbdc48cee35e88400ad13c3452`
+- Live URL: <https://job-liveness-proof.sociobot.in>
 
-## Repair
+Result: **FAIL**
 
-The failed `ad11f071d046f64fbc53f14f02d835761273b416` revision was reproduced with an otherwise empty environment containing only `PORT`: `run-proof-server` exited before binding because `src/main.rs` required `RUN_PROOF_SECRET` and panicked with `RUN_PROOF_SECRET must be set to a strong random value: NotPresent`. Azure also reported the deployed revision as `ActivationFailed` with only `PORT=8080` configured.
+Independent verification is recorded in [`.factory/verification.md`](verification.md). No product code was changed.
 
-The server now starts with only `PORT` (default 8080), binds `0.0.0.0:$PORT`, serves the built product at `/`, and responds at `/health`. If `RUN_PROOF_SECRET` is absent, first boot obtains 32 CSPRNG bytes, hex-encodes them, and persists the secret as mode `0600` next to SQLite (`/data/run-proof.secret` in the image); future starts reuse it. Supplied secrets still override the generated value. One structured startup line records whether database, key ID, and secret were supplied, defaulted, generated, or persisted without logging a secret.
+## Blocking findings
 
-The Docker image now has no runtime configuration `ENV` values. The full deployment SHA is baked into the server binary from Docker `BUILD_SHA`, so `/health` cannot depend on an additional runtime variable. The frontend service-worker cache version was advanced and now precaches the stable JS/CSS shell, including a browser regression test for offline reload.
+1. **Critical — live state is split and ephemeral.** Azure has two healthy replicas, scales 1–3, supplies only `PORT`, and has no volume mount. Each replica logged `database=defaulted` and `secret=generated`, so the deployment has separate SQLite ledgers and signing keys and loses them with replica/revision lifecycle.
+2. **High — receipts cross job boundaries.** Two jobs using the same run ID export one merged receipt with both jobs' events and no `job_key`.
+3. **High — accepted out-of-order evidence breaks the UI.** A finish without a start yields an empty schedule; the frontend throws in `Intl.RelativeTimeFormat` and leaves the entire ledger stuck loading.
+4. **High — receipt signatures are not verifiable.** The signed request timestamp and exact body are not retained/exported, and registration signatures are not persisted.
 
-## Build, test, and verification
+Additional defects cover 200% text resize, unsafe immutable caching of stable app filenames, a bypassable/unbounded rate limiter, unknown API routes returning HTML 200, small touch targets, missing PWA icons/security headers, and failing rustfmt. See the full report for exact reproductions and severity.
 
-- Reproduction: base commit exited with the missing-secret panic above when run with `env -i PORT=18080`.
-- Focused Rust integration regression: real `run-proof-server` launched with `env_clear()` plus only `PORT`; `/health` and `/` returned `200`, the generated secret was private, and a restart reused it.
-- `npm test`: passed — 2 frontend unit tests, 4 Rust integration tests, production Vite build, and 9 Playwright checks (one desktop-only overflow assertion skipped in the mobile project as intended).
-- `npm run check`: passed — TypeScript and Clippy with warnings denied.
-- `cargo build --locked --release --bin run-proof-server --bin run-proof`: passed.
-- `RUN_PROOF_URL=http://127.0.0.1:18081 ./scripts/load-smoke.sh`: passed — 100/100 health requests.
-- Playwright covers title/landmark/one-h1/console smoke, keyboard skip-link navigation, desktop and 390×844 mobile, Axe serious/critical checks in light and dark modes, legal pages, cached offline reload, and no third-party requests on the privacy page.
-- Clean registry build command: `az acr build --registry sociobotregistry --image sf-job-liveness-proof:5669689b9910a2b37c5efe1a433019754bd4dc0f --file Dockerfile --build-arg BUILD_SHA=5669689b9910a2b37c5efe1a433019754bd4dc0f --timeout 1800 --no-wait --no-logs .`
+## Verification summary
 
-## Run and deploy
+- Clean candidate checkout and `npm ci`: PASS, 0 npm vulnerabilities.
+- `npm test`: PASS — 2 Vitest, 4 Rust integration, production Vite build, 9 applicable Playwright checks.
+- `npm run check`: PASS — TypeScript and Clippy with warnings denied.
+- Locked release binaries with candidate build SHA: PASS.
+- CLI installed into a clean consumer prefix and exercised end to end: PASS for the normal single-process path.
+- Local persistence restart, 100 concurrent health requests, and 50 concurrent signed writes: PASS.
+- Live identity: exact candidate SHA; JS/CSS/SW byte-match candidate.
+- Live Axe serious/critical: 0. Normal-size desktop/mobile keyboard and reduced-motion checks pass.
+- Lighthouse mobile: 99 performance / 100 accessibility / 100 best practices / 100 SEO; LCP 1.1s, TBT 140ms, CLS 0; 94KB transfer.
+- Offline reload after service-worker control: PASS; update caching strategy: FAIL.
+- `cargo fmt --all -- --check`: FAIL.
+- Dockerfile execution was blocked by the verifier host's disabled user namespaces after Buildah installation; both build stages passed directly and the live candidate image is healthy.
 
-```sh
-npm ci
-npm test
-docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t run-proof .
-docker run --rm -e PORT=8080 -p 8080:8080 run-proof
-```
+## Next steps
 
-The factory deployment configuration remains an external Azure Container App with target port 8080 and only `PORT=8080` set. The clean ACR build `cha0` succeeded, and image `sociobotregistry.azurecr.io/sf-job-liveness-proof:5669689b9910a2b37c5efe1a433019754bd4dc0f` is deployed as revision `sf-job-liveness-proof--0000001` (Running/Healthy).
-
-Live probes completed at 2026-08-28T03:16Z:
-
-- `https://sf-job-liveness-proof.orangepond-1638693f.eastus2.azurecontainerapps.io/` → `200`; `/health` → `{"build_sha":"5669689b9910a2b37c5efe1a433019754bd4dc0f","status":"ok"}`.
-- `https://job-liveness-proof.sociobot.in/` → `200`; `/health` → `{"build_sha":"5669689b9910a2b37c5efe1a433019754bd4dc0f","status":"ok"}`.
-- Revision startup logs show `database=defaulted`, `secret=generated`, `key_id=defaulted`, followed by `Run Proof listening` on port 8080; secret material was not logged.
-
-## Known gaps
-
-Container App has no mounted Azure Files volume in its current factory configuration. `/data` is still the correct persistent path for deployments that mount storage; without a volume, generated signing state survives process restarts only for the lifecycle of that revision. A durable mount is a factory infrastructure choice and was not changed here.
+Use shared durable state and one shared signing identity (or force a single replica only as a temporary mitigation), change receipt identity to `(job_key, run_id)`, retain verifiable signed material, handle finish-before-start without invalid timestamps, then address the medium/low findings and repeat independent QA.
