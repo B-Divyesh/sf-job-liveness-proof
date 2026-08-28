@@ -34,6 +34,11 @@ use tower_http::{
 type HmacSha256 = Hmac<Sha256>;
 type JobSchedule = (String, i64, i64, Option<DateTime<Utc>>);
 
+struct RateBucket {
+    updated: Instant,
+    tokens: f64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
@@ -41,7 +46,9 @@ pub struct AppState {
     pub key_id: Arc<String>,
     pub retention_days: i64,
     pub clock_skew_seconds: i64,
-    limiter: Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>,
+    limiter: Arc<Mutex<HashMap<IpAddr, RateBucket>>>,
+    billing_client: reqwest::Client,
+    billing_base: Arc<String>,
     pub build_sha: Arc<String>,
 }
 
@@ -57,8 +64,8 @@ pub enum ApiError {
     NotFound,
     #[error("API route not found")]
     RouteNotFound,
-    #[error("too many ingest requests; retry shortly")]
-    RateLimited,
+    #[error("license verification is temporarily unavailable")]
+    BillingUnavailable,
     #[error("database error")]
     Database(#[from] sqlx::Error),
 }
@@ -71,7 +78,7 @@ impl IntoResponse for ApiError {
             Self::Conflict => StatusCode::CONFLICT,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::RouteNotFound => StatusCode::NOT_FOUND,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::BillingUnavailable => StatusCode::BAD_GATEWAY,
             Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let public = if matches!(self, Self::Database(_)) {
@@ -113,7 +120,6 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
 
 pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
     let api = Router::new()
-        .route("/health", get(health))
         .route("/api/v1/config", get(config))
         .route("/api/v1/jobs", post(register_job))
         .route("/api/v1/runs/start", post(start_run))
@@ -122,10 +128,10 @@ pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
         .route("/api/v1/ledger", get(ledger))
         .route("/api/v1/exports/ledger.csv", get(export_csv))
         .route("/api/v1/jobs/:job_key/runs/:run_id/receipt", get(receipt))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            ingest_rate_limit,
-        ));
+        .route(
+            "/api/v1/products/job-liveness-proof/verify",
+            post(verify_license),
+        );
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
@@ -135,10 +141,15 @@ pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
             header::HeaderName::from_static("x-run-proof-timestamp"),
             header::HeaderName::from_static("x-run-proof-signature"),
         ]);
-    let app = Router::new()
+    let api = Router::new()
         .merge(api)
         .route("/api", any(api_not_found))
-        .route("/api/*path", any(api_not_found));
+        .route("/api/*path", any(api_not_found))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_rate_limit,
+        ));
+    let app = Router::new().route("/health", get(health)).merge(api);
     let app = if let Some(dir) = static_dir {
         app.fallback_service(
             ServeDir::new(dir).fallback(ServeFile::new(format!("{dir}/index.html"))),
@@ -151,14 +162,16 @@ pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
         .layer(SetResponseHeaderLayer::if_not_present(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer")))
         .layer(SetResponseHeaderLayer::if_not_present(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=31536000")))
         .layer(SetResponseHeaderLayer::if_not_present(header::HeaderName::from_static("permissions-policy"), HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=()")))
-        .layer(SetResponseHeaderLayer::if_not_present(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' https://api.sociobot.in; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")))
+        .layer(SetResponseHeaderLayer::if_not_present(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")))
 }
 
 async fn cache_headers(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if !response.headers().contains_key(header::CACHE_CONTROL) {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
     response
 }
 
@@ -176,33 +189,104 @@ async fn config(State(state): State<AppState>) -> Json<serde_json::Value> {
     )
 }
 
-async fn ingest_rate_limit(
+fn client_ip(headers: &HeaderMap, connect: Option<ConnectInfo<SocketAddr>>) -> IpAddr {
+    headers
+        .get(header::HeaderName::from_static("x-forwarded-for"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .and_then(|value| value.parse().ok())
+        .or_else(|| connect.map(|ConnectInfo(address)| address.ip()))
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
+
+fn too_many_requests() -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+            "error": "too many requests; retry shortly"
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+async fn request_rate_limit(
     State(state): State<AppState>,
     connect: Option<ConnectInfo<SocketAddr>>,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, ApiError> {
-    if request.method() == Method::POST {
-        const WINDOW: StdDuration = StdDuration::from_secs(1);
-        const MAX_SOURCES: usize = 4096;
-        let source = connect
-            .map(|ConnectInfo(address)| address.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+) -> Response {
+    const RATE_PER_SECOND: f64 = 20.0;
+    const BURST: f64 = 40.0;
+    const IDLE_TTL: StdDuration = StdDuration::from_secs(300);
+    const MAX_SOURCES: usize = 4096;
+    let source = client_ip(request.headers(), connect);
+    {
+        let now = Instant::now();
         let mut map = state.limiter.lock().expect("rate limiter lock");
-        map.retain(|_, (started, _)| started.elapsed() <= WINDOW);
+        map.retain(|_, bucket| now.duration_since(bucket.updated) <= IDLE_TTL);
         if !map.contains_key(&source) && map.len() >= MAX_SOURCES {
-            return Err(ApiError::RateLimited);
+            return too_many_requests();
         }
-        let entry = map.entry(source).or_insert((Instant::now(), 0));
-        if entry.0.elapsed() > WINDOW {
-            *entry = (Instant::now(), 0);
+        let bucket = map.entry(source).or_insert(RateBucket {
+            updated: now,
+            tokens: BURST,
+        });
+        let replenished = now.duration_since(bucket.updated).as_secs_f64() * RATE_PER_SECOND;
+        bucket.tokens = (bucket.tokens + replenished).min(BURST);
+        bucket.updated = now;
+        if bucket.tokens < 1.0 {
+            return too_many_requests();
         }
-        entry.1 += 1;
-        if entry.1 > 100 {
-            return Err(ApiError::RateLimited);
-        }
+        bucket.tokens -= 1.0;
     }
-    Ok(next.run(request).await)
+    next.run(request).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LicenseInput {
+    license: String,
+}
+
+async fn verify_license(State(state): State<AppState>, body: Bytes) -> Result<Response, ApiError> {
+    let input: LicenseInput = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::BadRequest("invalid license request".into()))?;
+    if input.license.is_empty() || input.license.len() > 4096 {
+        return Err(ApiError::BadRequest(
+            "license must contain 1–4096 characters".into(),
+        ));
+    }
+    let url = format!(
+        "{}/api/v1/products/job-liveness-proof/verify",
+        state.billing_base.trim_end_matches('/')
+    );
+    let upstream = state
+        .billing_client
+        .get(url)
+        .query(&[("license", input.license)])
+        .send()
+        .await
+        .map_err(|_| ApiError::BillingUnavailable)?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())
+        .map_err(|_| ApiError::BillingUnavailable)?;
+    let retry_after = upstream.headers().get(header::RETRY_AFTER).cloned();
+    let verdict = upstream
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| ApiError::BillingUnavailable)?;
+    let mut response = (status, Json(verdict)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(value) = retry_after {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    Ok(response)
 }
 
 fn validate_id(value: &str, label: &str) -> Result<(), ApiError> {
@@ -868,7 +952,17 @@ impl AppState {
             retention_days,
             clock_skew_seconds,
             limiter: Arc::new(Mutex::new(HashMap::new())),
+            billing_client: reqwest::Client::builder()
+                .timeout(StdDuration::from_secs(10))
+                .build()
+                .expect("build billing HTTP client"),
+            billing_base: Arc::new("https://api.sociobot.in".into()),
             build_sha: Arc::new(build_sha),
         }
+    }
+
+    pub fn with_billing_base(mut self, billing_base: String) -> Self {
+        self.billing_base = Arc::new(billing_base);
+        self
     }
 }

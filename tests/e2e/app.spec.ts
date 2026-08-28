@@ -88,3 +88,27 @@ test('privacy page makes no third-party requests', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Privacy' })).toBeVisible();
   expect(external).toEqual([]);
 });
+
+test('returned licenses use the rate-limited same-origin verification proxy', async ({ page }) => {
+  const verificationRequests: string[] = [];
+  const external: string[] = [];
+  await page.route('**/api/v1/products/job-liveness-proof/verify', async route => {
+    verificationRequests.push(route.request().url());
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON()).toEqual({ license: 'invalid-token' });
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ valid: false, reason: 'invalid', expires_at: null }),
+    });
+  });
+  page.on('request', request => {
+    if (new URL(request.url()).origin !== 'http://127.0.0.1:4179') external.push(request.url());
+  });
+  await page.goto('/?license=invalid-token');
+  await expect.poll(() => verificationRequests.length).toBe(1);
+  expect(new URL(verificationRequests[0]).origin).toBe('http://127.0.0.1:4179');
+  expect(verificationRequests[0]).not.toContain('invalid-token');
+  expect(external).toEqual([]);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('sb_license:job-liveness-proof'))).toBe('invalid-token');
+  expect(page.url()).not.toContain('license=');
+});

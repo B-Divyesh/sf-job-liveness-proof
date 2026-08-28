@@ -6,7 +6,7 @@ It does **not** execute jobs, retain job payloads, replace CI, or route alerts.
 
 ## What ships
 
-- Rust/axum receiver with SQLite, HMAC-SHA256 verification, clock-skew checks, validation, rate limiting, structured logs, and graceful shutdown.
+- Rust/axum receiver with SQLite, HMAC-SHA256 verification, clock-skew checks, forwarded-client rate limiting on every API route, structured logs, and graceful shutdown.
 - `run-proof` CLI for job registration, start/finish receipts, and CI snapshots.
 - Responsive ledger with per-run JSON receipts, full CSV export, last-known offline view, and explicit empty/error/offline states.
 - Configurable retention and no application payload field in any ingest schema.
@@ -76,9 +76,11 @@ docker run --rm -p 8080:8080 \
 
 The image runs as UID/GID `10001`, starts with only `PORT` (default `8080`), serves frontend and API on `0.0.0.0:$PORT`, and stores SQLite plus a generated signing secret under `/data`. Mount `/data` on durable storage and keep the deployment at one replica; the generated secret is atomically created and reused across restarts and rolling revisions. Build it with the full commit SHA command above so `/health` reports the deployed commit. The factory owns infrastructure, DNS, TLS, and product registration.
 
+The factory release command is `scripts/deploy-container.sh <full-commit-sha>`. It builds the work-order Dockerfile in ACR and atomically reasserts the existing `data-job-liveness-proof` Azure Files mount plus `minReplicas=1` / `maxReplicas=1` on every rollout. `npm run verify:deployment -- <sha>` fails if either the durable topology or live build identity drifts.
+
 ## Privacy, purchases, and license
 
-No analytics, tracking, third-party fonts, or runtime CDN scripts are included. The browser stores only a last-known ledger, optional saved view, and optional Sociobot license. Checkout and once-daily verification use the Sociobot billing API; Dodo/Sociobot is merchant of record. See `/privacy` and `/terms` in the running app.
+No analytics, tracking, third-party fonts, or runtime CDN scripts are included. The browser stores only a last-known ledger, optional saved view, and optional Sociobot license. Checkout uses the Sociobot billing API; once-daily verification is relayed by this receiver to the same API so it shares the receiver's abuse controls. Dodo/Sociobot is merchant of record. See `/privacy` and `/terms` in the running app.
 
 Artwork was generated for this repository using the factory image model. Its prompt, checksum, and provenance are in [`.factory/design.md`](.factory/design.md) and [`assets/src/run-proof-diorama.json`](assets/src/run-proof-diorama.json).
 

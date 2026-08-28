@@ -1,6 +1,9 @@
 use axum::{
     body::Body,
+    extract::Query,
     http::{Request, StatusCode},
+    routing::get,
+    Json, Router,
 };
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -195,7 +198,7 @@ async fn finish_before_start_is_renderable_and_scoped() {
 }
 
 #[tokio::test]
-async fn unknown_api_routes_are_json_404_and_limiter_cannot_be_bypassed_by_key() {
+async fn every_non_health_route_uses_first_forwarded_ip_and_returns_retry_after() {
     let app = app().await;
     let missing = app
         .clone()
@@ -211,8 +214,59 @@ async fn unknown_api_routes_are_json_404_and_limiter_cannot_be_bypassed_by_key()
     assert_eq!(missing.headers()["cache-control"], "no-cache");
     assert!(missing.headers().contains_key("strict-transport-security"));
     assert!(missing.headers().contains_key("permissions-policy"));
-    for index in 0..100 {
+    for _ in 0..40 {
+        let request = Request::get("/api/v1/config")
+            .header("x-forwarded-for", "198.51.100.77, 10.0.0.12")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    let limited = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/config")
+                .header("x-forwarded-for", "198.51.100.77, 203.0.113.22")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()["retry-after"], "1");
+
+    let different_first_hop = Request::post("/api/v1/jobs")
+        .header("x-forwarded-for", "198.51.100.78, 198.51.100.77")
+        .header("x-run-proof-key", "untrusted-key")
+        .body(Body::from("{}"))
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(different_first_hop)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Health is explicitly exempt so platform probes cannot be starved.
+    for _ in 0..60 {
+        let request = Request::get("/health")
+            .header("x-forwarded-for", "198.51.100.77")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    // Rotating an unauthenticated key cannot create a fresh source bucket.
+    for index in 0..40 {
         let request = Request::post("/api/v1/jobs")
+            .header("x-forwarded-for", "203.0.113.9")
             .header("x-run-proof-key", format!("attacker-{index}"))
             .body(Body::from("{}"))
             .unwrap();
@@ -222,13 +276,93 @@ async fn unknown_api_routes_are_json_404_and_limiter_cannot_be_bypassed_by_key()
         );
     }
     let request = Request::post("/api/v1/jobs")
+        .header("x-forwarded-for", "203.0.113.9")
         .header("x-run-proof-key", "another-key")
         .body(Body::from("{}"))
         .unwrap();
-    assert_eq!(
-        app.oneshot(request).await.unwrap().status(),
-        StatusCode::TOO_MANY_REQUESTS
+    let limited = app.oneshot(request).await.unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()["retry-after"], "1");
+}
+
+#[tokio::test]
+async fn license_verification_is_same_origin_proxied_no_store_and_rate_limited() {
+    async fn billing(
+        Query(query): Query<std::collections::HashMap<String, String>>,
+    ) -> Json<Value> {
+        Json(json!({
+            "valid": false,
+            "reason": if query.get("license").map(String::as_str) == Some("invalid-token") {
+                "invalid"
+            } else {
+                "wrong_product"
+            },
+            "expires_at": null
+        }))
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let billing_server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/api/v1/products/job-liveness-proof/verify", get(billing)),
+        )
+        .await
+        .unwrap();
+    });
+    let pool = connect("sqlite::memory:").await.unwrap();
+    let app = router(
+        AppState::new(
+            pool,
+            SECRET.into(),
+            "test".into(),
+            30,
+            300,
+            "test-sha".into(),
+        )
+        .with_billing_base(format!("http://{address}")),
+        None,
     );
+    let path = "/api/v1/products/job-liveness-proof/verify";
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(path)
+                .header("x-forwarded-for", "192.0.2.44")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"license":"invalid-token"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(json(response).await["reason"], "invalid");
+
+    let mut limited = None;
+    for _ in 0..100 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("x-forwarded-for", "192.0.2.44")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(response);
+            break;
+        }
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let limited = limited.expect("license verification route must be rate limited");
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()["retry-after"], "1");
+    billing_server.abort();
 }
 
 #[tokio::test]
