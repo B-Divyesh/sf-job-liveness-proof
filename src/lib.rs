@@ -96,7 +96,11 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     let mut options = SqliteConnectOptions::from_str(database_url)?
         .foreign_keys(true)
         .busy_timeout(StdDuration::from_secs(10));
-    if !durable_network_mount {
+    if durable_network_mount {
+        // Azure Files does not expose POSIX byte-range locks to Container Apps.
+        // SQLite's dot-file VFS provides a network-filesystem-compatible lock.
+        options = options.vfs("unix-dotfile");
+    } else {
         options = options.journal_mode(SqliteJournalMode::Wal);
     }
     let pool = SqlitePoolOptions::new()

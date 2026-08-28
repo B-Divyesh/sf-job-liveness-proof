@@ -330,3 +330,24 @@ async fn server_starts_and_serves_with_only_port() {
     restarted.wait().unwrap();
     fs::remove_dir_all(workdir).unwrap();
 }
+
+#[tokio::test]
+async fn durable_mount_uses_a_network_filesystem_safe_vfs() {
+    let directory = std::env::temp_dir().join("data").join(format!(
+        "run-proof-vfs-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let database_url = format!("sqlite://{}/run-proof.db?mode=rwc", directory.display());
+    let pool = connect(&database_url).await.unwrap();
+    sqlx::query("INSERT INTO jobs(job_key,display_name,expected_interval_seconds,grace_seconds,created_at,updated_at) VALUES('vfs','VFS',60,0,'now','now')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    assert!(directory.join("run-proof.db").metadata().unwrap().len() > 0);
+    fs::remove_dir_all(directory).unwrap();
+}
