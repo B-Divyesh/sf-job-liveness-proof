@@ -10,7 +10,7 @@ It does **not** execute jobs, retain job payloads, replace CI, or route alerts.
 - `run-proof` CLI for job registration, start/finish receipts, and CI snapshots.
 - Responsive ledger with per-run JSON receipts, full CSV export, last-known offline view, and explicit empty/error/offline states.
 - Configurable retention and no application payload field in any ingest schema.
-- Run Proof Plus, a $29 one-time license that unlocks saved views and extended-retention controls. Core evidence and all exports remain free.
+- Run Proof Plus, a $29 one-time license that unlocks a saved operational view and supports maintenance. Core evidence, retention configuration, and all exports remain free.
 
 ## Run locally
 
