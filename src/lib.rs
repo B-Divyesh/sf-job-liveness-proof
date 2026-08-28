@@ -93,15 +93,12 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
     // SQLite WAL relies on shared-memory primitives that network file systems do
     // not provide. The container's durable /data mount therefore uses the
     // rollback journal; local disks retain WAL's better write concurrency.
-    let journal_mode = if durable_network_mount {
-        SqliteJournalMode::Delete
-    } else {
-        SqliteJournalMode::Wal
-    };
-    let options = SqliteConnectOptions::from_str(database_url)?
+    let mut options = SqliteConnectOptions::from_str(database_url)?
         .foreign_keys(true)
-        .busy_timeout(StdDuration::from_secs(10))
-        .journal_mode(journal_mode);
+        .busy_timeout(StdDuration::from_secs(10));
+    if !durable_network_mount {
+        options = options.journal_mode(SqliteJournalMode::Wal);
+    }
     let pool = SqlitePoolOptions::new()
         .max_connections(connections)
         .connect_with(options)
