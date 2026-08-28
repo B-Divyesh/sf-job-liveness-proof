@@ -1,0 +1,9 @@
+{
+  "slug": "job-liveness-proof",
+  "title": "Run Proof",
+  "artifact_class": "web-with-backend",
+  "user": "Small application teams with cron jobs and queue workers who need a compact, trustworthy record that scheduled work actually ran and completed.",
+  "smallest_useful_product": "A self-hostable receiver and CLI that accepts signed start/finish heartbeats, imports a CI check snapshot, and renders a one-page missed/late/contradictory-run ledger.",
+  "constraints": ["signed ingest", "configurable retention", "no job payload retention", "clock-skew handling", "offline export"],
+  "monetization": "one-time"
+}
