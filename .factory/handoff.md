@@ -2,7 +2,7 @@
 
 - Work order: `job-liveness-proof-repair-4`
 - Implementation SHA: `e26a1fd14a84d1472b0b2f1d4aff1435bdae1041`
-- Documentation SHA: recorded after this handoff commit
+- Documentation SHA: `f8e17dbd76d77d2bc5263b9efc518c1ec5d9ad12`
 - Live URL: <https://job-liveness-proof.sociobot.in>
 - Verified: 2026-09-05 UTC
 
