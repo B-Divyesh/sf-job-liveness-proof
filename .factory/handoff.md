@@ -1,42 +1,86 @@
-# Run Proof independent verification handoff — FAIL
+# Run Proof repair handoff
 
-- Work order: `job-liveness-proof-verify-3`
-- Candidate: `fd8a53a66955aa524d076970c109cef948863dc3`
+- Work order: `job-liveness-proof-repair-4`
+- Implementation SHA: `e26a1fd14a84d1472b0b2f1d4aff1435bdae1041`
+- Documentation SHA: recorded after this handoff commit
 - Live URL: <https://job-liveness-proof.sociobot.in>
-- Verified: 2026-08-28 UTC
-- Result: **FAIL — do not promote**
-- Full evidence: [`.factory/verification-3.md`](verification-3.md)
+- Verified: 2026-09-05 UTC
 
-## Release blockers
+## What changed
 
-1. **Critical — deployed evidence is not durable.** Fresh Azure state for active revision `sf-job-liveness-proof--0000013` has `minReplicas=1`, `maxReplicas=3`, no volumes, and no `/data` mount. Startup logged `database=defaulted` and `secret=generated`. The repository's deployment verifier exits `1`. The live SQLite ledger and signing identity can be lost on restart and diverge across replicas.
-2. **High — `.factory/claims.json` is missing.** There are no `@claim:` tests, while the page and README make claims about signed ingest, payload privacy, offline use/export, retention, CSV/receipt exports, and tracking. This mandatory gate fails before general QA.
-3. **High — no one-click isolated demo and cold first-read fails.** The first screen does not name the intended cron/queue-worker team, explain the first-click result, or offer “Try it with sample data”. `/demo` is only the ordinary empty app; `.factory/demo.md` and the CLI demo command/sample are absent.
-4. **High — historical receipts are mutable.** Re-registering a job replaces the schedule registration attached to an already-completed run. In a fresh reproduction, the same receipt's hash changed from `sha256:126eda…` to `sha256:db96cd…` and displayed the later schedule. Preserve versioned registration intent per run.
+- Added immutable `job_registrations` versions and bound each event and CI
+  snapshot to the schedule registration in force for that run.
+  Re-registering a job now leaves completed receipt registration evidence and
+  receipt hash unchanged.
+- Added `/demo` and `GET /api/v1/demo/ledger`. The endpoint generates four
+  realistic rows in memory and does not read or write SQLite. The browser uses
+  the separate `demo:run-proof:last-ledger` storage key.
+- Added the first-screen sample action, persistent demo banner, reset control,
+  real-data exit, local sample CSV/receipt downloads, and plain cold-start copy.
+- Added `.factory/claims.json`, exactly one tagged outcome test for every
+  listed claim, `.factory/demo.md`, and the landing copy audit.
+- Completed the public site work: self-hosted fonts now render, route titles
+  and focus announcements update, the footer shows Param Factory and build ID,
+  all required metadata is present, unknown browser paths serve a designed 404,
+  and Vite-hashed assets receive immutable caching.
+- Updated Docker to use `rust:1-slim`, accepted factory build identity args,
+  and kept its non-root `/data` runtime contract.
+- Added the catalog description and copied it to
+  `/work/.evidence/catalog-description.txt`.
 
-## Other findings
+## Deployment and durability
 
-- Medium: selectors request `Bitter` / `Atkinson Hyperlegible Next`, but bundled faces are named `Bitter Variable` / `Atkinson Hyperlegible Next Variable`. Chromium actually rendered Liberation Serif and DejaVu Sans and fetched no fonts.
-- Medium: unknown browser paths return the home page with `200`; canonical/OG/Twitter/apple-touch metadata are absent; footer lacks Param Factory and build identity; route focus announcement is absent.
-- Low: all static assets, including content-hashed ones, return `Cache-Control: no-cache` rather than immutable caching.
+The ACR implementation build `ch250` succeeded. The local deployment wrapper
+timed out while its remote build was still running, so the same repository
+patch was applied directly after the successful build:
 
-## What passed
+- image: `sociobotregistry.azurecr.io/sf-job-liveness-proof:e26a1fd14a84`
+- durable Azure Files mount: `data-job-liveness-proof` at `/data`
+- replica bounds: `minReplicas=1`, `maxReplicas=1`
 
-- Clean install: 60 packages, 0 npm audit vulnerabilities.
-- `npm test`: Vitest 2/2, Rust integration 9/9, Vite build, Playwright 15 passed / 3 intended skips.
-- `npm run check` and standalone `npm run build`: PASS.
-- Clean-target locked release build with the full candidate SHA: PASS. It starts with only `PORT`, generates a mode-`0600` secret, reuses it after restart, serves the app, and reports the candidate SHA.
-- Clean consumer Cargo install: both CLI and server installed and the CLI public workflow was exercised.
-- Isolated E2E: signed register/start/finish(count `0`)/failed CI snapshot, contradictory and missed states, receipt/CSV exports, independently verified HMACs, boundary and invalid inputs, recovery, 50 concurrent writes, 100 health requests, and restart persistence passed.
-- Live identity: `/health` returns the exact candidate. Shell, JS, CSS, service worker, manifest, and hero assets byte-match local output.
-- Live rate limiting: general burst 182×`200` + 68×`429`; license burst 30×`200` + 10×`429`; every `429` has `Retry-After: 1`.
-- Desktop/390px mobile, 200% text, keyboard/focus, dark mode, reduced motion, Axe, ordinary console/network privacy, response headers/CORS, license proxy behavior, service-worker update/offline reload, and error recovery passed.
-- Lighthouse mobile: Performance 90, Accessibility 100, Best Practices 100, SEO 100; LCP 2.0 s, CLS 0; transfer 98 KiB. JS 17,881 bytes and CSS 18,464 bytes.
+`npm run verify:deployment -- e26a1fd14a84d1472b0b2f1d4aff1435bdae1041`
+passed before and after a real restart of revision
+`sf-job-liveness-proof--0000014`. Its post-restart product log reported
+`secret=persisted`; no secret value was logged.
 
-## Reverification order
+## Verification
 
-1. Deploy the candidate through `scripts/deploy-container.sh <full-sha>` and require `npm run verify:deployment -- <full-sha>` to pass; then prove data and secret survival across a real replica replacement.
-2. Add `/demo` plus CLI demo/sample data, `.factory/demo.md`, `.factory/claims.json`, and exactly one tagged observable test per retained claim.
-3. Version job registrations and bind historical runs/derived alerts to the registration in force at schedule time.
-4. Correct font family names and complete 404, metadata, footer build identity, and route-focus behavior.
-5. Repeat all commands and live checks in `.factory/verification-3.md` against a new commit/deployment.
+- `npm test`: pass — Vitest 2/2, Rust integration 12/12, production build,
+  Playwright 24 passed and 2 intentional mobile/desktop skips.
+- `npm run check`: pass — TypeScript, rustfmt, and Clippy with warnings denied.
+- Every command in `.factory/claims.json`: pass from the documented setup.
+- Clean consumer install: the installed CLI registered, started, finished with
+  count `0`, added a failed CI observation, and exported a receipt from an
+  isolated local receiver. Both installed binaries and the persisted consumer
+  SQLite artifact were checked after clean shutdown.
+- Live HTTPS: `/health` reports the implementation SHA; `/demo` returns one
+  each of contradictory, missed, late, and completed sample rows; unknown pages
+  return the designed HTTP 404; hashed font responses are immutable.
+- Fresh live desktop and phone browser checks found no console errors or
+  overflow. Before scrolling, both clearly state the job, audience, and first
+  action: **Track scheduled jobs that ran**; small app teams running cron jobs
+  and queue workers; **Try it with sample data**. Screenshots are at
+  `/work/.evidence/run-proof-desktop.png` and
+  `/work/.evidence/run-proof-phone.png`.
+- Live Axe WCAG A/AA serious/critical findings: none on `/`, `/demo`,
+  `/privacy`, or `/terms` at phone width.
+- Live general limiter burst: 157 `200`, 93 `429`; live license-proxy burst:
+  14 `200`, 6 `429`. Follow-up responses included `Retry-After: 1`.
+
+## Prior findings disposition
+
+The earlier cross-job receipt scoping, finish-before-start rendering,
+verifiable signed receipt material, safe forwarded-IP rate limiting, PWA
+updates, touch targets, header policy, and SQLite network-mount behavior remain
+covered by the passing integration/browser suite. The latest verification's
+four blockers and its font, routing, metadata, footer, focus, and cache
+findings are repaired above.
+
+## Known gap
+
+Run Proof Plus remains a paid one-time deliverable. The free core works.
+The live checkout endpoint returned `404` with `enabled factory product` during
+this repair, so factory billing registration is still required before a buyer
+can complete checkout. The public offer metadata is in
+`/work/.evidence/billing-offer.json`; the page and README name the dependency
+plainly. No payment credentials were added.
