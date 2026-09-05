@@ -4,7 +4,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, get, get_service, post},
     Json, Router,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -125,6 +125,7 @@ pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
         .route("/api/v1/runs/start", post(start_run))
         .route("/api/v1/runs/finish", post(finish_run))
         .route("/api/v1/ci-snapshots", post(ci_snapshot))
+        .route("/api/v1/demo/ledger", get(demo_ledger))
         .route("/api/v1/ledger", get(ledger))
         .route("/api/v1/exports/ledger.csv", get(export_csv))
         .route("/api/v1/jobs/:job_key/runs/:run_id/receipt", get(receipt))
@@ -151,9 +152,14 @@ pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
         ));
     let app = Router::new().route("/health", get(health)).merge(api);
     let app = if let Some(dir) = static_dir {
-        app.fallback_service(
-            ServeDir::new(dir).fallback(ServeFile::new(format!("{dir}/index.html"))),
-        )
+        let shell = get_service(ServeFile::new(format!("{dir}/index.html")));
+        app.route("/", shell.clone())
+            .route("/demo", shell.clone())
+            .route("/privacy", shell.clone())
+            .route("/terms", shell)
+            .fallback_service(
+                ServeDir::new(dir).not_found_service(ServeFile::new(format!("{dir}/404.html"))),
+            )
     } else {
         app
     };
@@ -166,11 +172,28 @@ pub fn router(state: AppState, static_dir: Option<&str>) -> Router {
 }
 
 async fn cache_headers(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
     if !response.headers().contains_key(header::CACHE_CONTROL) {
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        let immutable = path.starts_with("/assets/")
+            && path.rsplit('/').next().is_some_and(|name| {
+                name.split('.').any(|part| {
+                    part.len() >= 8
+                        && part.chars().all(|character| {
+                            character.is_ascii_alphanumeric()
+                                || character == '_'
+                                || character == '-'
+                        })
+                })
+            });
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(if immutable {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            }),
+        );
     }
     response
 }
@@ -400,11 +423,18 @@ async fn register_job(
         ));
     }
     let now = Utc::now().to_rfc3339();
+    let mut transaction = state.pool.begin().await?;
+    let registration = sqlx::query("INSERT INTO job_registrations(job_key,display_name,expected_interval_seconds,grace_seconds,created_at,signed_key_id,signed_timestamp,signed_body,signature) VALUES(?,?,?,?,?,?,?,?,?)")
+        .bind(&input.job_key).bind(input.display_name.trim()).bind(input.expected_interval_seconds).bind(input.grace_seconds).bind(&now).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).bind(&signed.signature).execute(&mut *transaction).await?;
+    let registration_id = registration.last_insert_rowid();
     sqlx::query("INSERT INTO jobs(job_key,display_name,expected_interval_seconds,grace_seconds,created_at,updated_at,signed_key_id,signed_timestamp,signed_body,signature) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_key) DO UPDATE SET display_name=excluded.display_name,expected_interval_seconds=excluded.expected_interval_seconds,grace_seconds=excluded.grace_seconds,updated_at=excluded.updated_at,signed_key_id=excluded.signed_key_id,signed_timestamp=excluded.signed_timestamp,signed_body=excluded.signed_body,signature=excluded.signature")
-        .bind(&input.job_key).bind(input.display_name.trim()).bind(input.expected_interval_seconds).bind(input.grace_seconds).bind(&now).bind(&now).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).bind(&signed.signature).execute(&state.pool).await?;
+        .bind(&input.job_key).bind(input.display_name.trim()).bind(input.expected_interval_seconds).bind(input.grace_seconds).bind(&now).bind(&now).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).bind(&signed.signature).execute(&mut *transaction).await?;
+    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({"recorded": true, "job_key": input.job_key})),
+        Json(
+            serde_json::json!({"recorded": true, "job_key": input.job_key, "registration_version": registration_id}),
+        ),
     ))
 }
 
@@ -435,9 +465,9 @@ async fn start_run(
         .map(|v| parse_time(v, "started_at"))
         .transpose()?
         .unwrap_or_else(Utc::now);
-    ensure_job(&state.pool, &input.job_key).await?;
-    let result = sqlx::query("INSERT INTO events(job_key,run_id,event_type,scheduled_at,occurred_at,received_at,signature,signed_key_id,signed_timestamp,signed_body) VALUES(?,?,'start',?,?,?,?,?,?,?)")
-        .bind(&input.job_key).bind(&input.run_id).bind(scheduled.to_rfc3339()).bind(occurred.to_rfc3339()).bind(Utc::now().to_rfc3339()).bind(&signed.signature).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).execute(&state.pool).await;
+    let registration_id = registration_for_run(&state.pool, &input.job_key, &input.run_id).await?;
+    let result = sqlx::query("INSERT INTO events(job_key,run_id,event_type,scheduled_at,occurred_at,received_at,signature,signed_key_id,signed_timestamp,signed_body,registration_id) VALUES(?,?,'start',?,?,?,?,?,?,?,?)")
+        .bind(&input.job_key).bind(&input.run_id).bind(scheduled.to_rfc3339()).bind(occurred.to_rfc3339()).bind(Utc::now().to_rfc3339()).bind(&signed.signature).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).bind(registration_id).execute(&state.pool).await;
     map_insert(result)?;
     Ok((
         StatusCode::CREATED,
@@ -477,15 +507,15 @@ async fn finish_run(
             "completion_count cannot be negative".into(),
         ));
     }
-    ensure_job(&state.pool, &input.job_key).await?;
+    let registration_id = registration_for_run(&state.pool, &input.job_key, &input.run_id).await?;
     let occurred = input
         .finished_at
         .as_deref()
         .map(|v| parse_time(v, "finished_at"))
         .transpose()?
         .unwrap_or_else(Utc::now);
-    let result = sqlx::query("INSERT INTO events(job_key,run_id,event_type,occurred_at,received_at,status,completion_count,signature,signed_key_id,signed_timestamp,signed_body) VALUES(?,?,'finish',?,?,?,?,?,?,?,?)")
-        .bind(&input.job_key).bind(&input.run_id).bind(occurred.to_rfc3339()).bind(Utc::now().to_rfc3339()).bind(&input.status).bind(input.completion_count).bind(&signed.signature).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).execute(&state.pool).await;
+    let result = sqlx::query("INSERT INTO events(job_key,run_id,event_type,occurred_at,received_at,status,completion_count,signature,signed_key_id,signed_timestamp,signed_body,registration_id) VALUES(?,?,'finish',?,?,?,?,?,?,?,?,?)")
+        .bind(&input.job_key).bind(&input.run_id).bind(occurred.to_rfc3339()).bind(Utc::now().to_rfc3339()).bind(&input.status).bind(input.completion_count).bind(&signed.signature).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).bind(registration_id).execute(&state.pool).await;
     map_insert(result)?;
     Ok((
         StatusCode::CREATED,
@@ -533,15 +563,15 @@ async fn ci_snapshot(
             ));
         }
     }
-    ensure_job(&state.pool, &input.job_key).await?;
+    let registration_id = registration_for_run(&state.pool, &input.job_key, &input.run_id).await?;
     let observed = input
         .observed_at
         .as_deref()
         .map(|v| parse_time(v, "observed_at"))
         .transpose()?
         .unwrap_or_else(Utc::now);
-    let result = sqlx::query("INSERT INTO ci_snapshots(job_key,run_id,source,observed_status,source_url,observed_at,received_at,signature,signed_key_id,signed_timestamp,signed_body) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(&input.job_key).bind(&input.run_id).bind(input.source.trim()).bind(&input.observed_status).bind(&input.source_url).bind(observed.to_rfc3339()).bind(Utc::now().to_rfc3339()).bind(&signed.signature).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).execute(&state.pool).await;
+    let result = sqlx::query("INSERT INTO ci_snapshots(job_key,run_id,source,observed_status,source_url,observed_at,received_at,signature,signed_key_id,signed_timestamp,signed_body,registration_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(&input.job_key).bind(&input.run_id).bind(input.source.trim()).bind(&input.observed_status).bind(&input.source_url).bind(observed.to_rfc3339()).bind(Utc::now().to_rfc3339()).bind(&signed.signature).bind(&signed.key_id).bind(&signed.timestamp).bind(&signed.body).bind(registration_id).execute(&state.pool).await;
     map_insert(result)?;
     Ok((
         StatusCode::CREATED,
@@ -549,18 +579,24 @@ async fn ci_snapshot(
     ))
 }
 
-async fn ensure_job(pool: &SqlitePool, key: &str) -> Result<(), ApiError> {
-    if sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM jobs WHERE job_key=?")
-        .bind(key)
-        .fetch_one(pool)
-        .await?
-        == 0
-    {
-        return Err(ApiError::BadRequest(
-            "register this job before sending run events".into(),
-        ));
+async fn registration_for_run(pool: &SqlitePool, key: &str, run_id: &str) -> Result<i64, ApiError> {
+    // Once a run has any evidence, every later event (including an
+    // out-of-order start or CI snapshot) follows that run's original intent.
+    if let Some(id) = sqlx::query_scalar::<_, i64>("SELECT registration_id FROM events WHERE job_key=? AND run_id=? AND registration_id IS NOT NULL ORDER BY id LIMIT 1")
+        .bind(key).bind(run_id).fetch_optional(pool).await? {
+        return Ok(id);
     }
-    Ok(())
+    if let Some(id) = sqlx::query_scalar::<_, i64>("SELECT registration_id FROM ci_snapshots WHERE job_key=? AND run_id=? AND registration_id IS NOT NULL ORDER BY id LIMIT 1")
+        .bind(key).bind(run_id).fetch_optional(pool).await? {
+        return Ok(id);
+    }
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM job_registrations WHERE job_key=? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("register this job before sending run events".into()))
 }
 
 fn map_insert(
@@ -626,18 +662,22 @@ struct LedgerQuery {
 
 async fn build_ledger(pool: &SqlitePool) -> Result<Vec<LedgerRow>, ApiError> {
     let records = sqlx::query_as::<_, RunDb>(r#"
-      SELECT j.job_key,j.display_name,j.expected_interval_seconds interval,j.grace_seconds grace,
+      SELECT j.job_key,COALESCE(jr.display_name,j.display_name) display_name,
+       COALESCE(jr.expected_interval_seconds,j.expected_interval_seconds) interval,
+       COALESCE(jr.grace_seconds,j.grace_seconds) grace,
        r.run_id,r.scheduled_at,r.started_at,r.finished_at,r.status,r.completion_count,
        s.source,s.observed_status,s.source_url,s.observed_at
       FROM jobs j
       LEFT JOIN (
-        SELECT job_key,run_id,MAX(CASE WHEN event_type='start' THEN scheduled_at END) scheduled_at,
+       SELECT job_key,run_id,MAX(CASE WHEN event_type='start' THEN scheduled_at END) scheduled_at,
          MAX(CASE WHEN event_type='start' THEN occurred_at END) started_at,
          MAX(CASE WHEN event_type='finish' THEN occurred_at END) finished_at,
          MAX(CASE WHEN event_type='finish' THEN status END) status,
-         MAX(CASE WHEN event_type='finish' THEN completion_count END) completion_count
+         MAX(CASE WHEN event_type='finish' THEN completion_count END) completion_count,
+         MAX(registration_id) registration_id
         FROM events GROUP BY job_key,run_id
       ) r ON r.job_key=j.job_key
+      LEFT JOIN job_registrations jr ON jr.id=r.registration_id
       LEFT JOIN ci_snapshots s ON s.id=(SELECT id FROM ci_snapshots cs WHERE cs.job_key=j.job_key AND cs.run_id=r.run_id ORDER BY observed_at DESC LIMIT 1)
       ORDER BY COALESCE(r.scheduled_at,j.created_at) DESC
     "#).fetch_all(pool).await?;
@@ -804,6 +844,88 @@ async fn ledger(
     }))
 }
 
+// Demo data is generated in memory for each request. It deliberately never
+// opens or reads the production SQLite pool, so the browser can exercise a
+// populated ledger without mixing sample and operator evidence.
+async fn demo_ledger() -> Json<LedgerResponse> {
+    let now = Utc::now();
+    let rows = vec![
+        LedgerRow {
+            job_key: "billing-sweep".into(),
+            display_name: "Nightly billing sweep".into(),
+            run_id: "demo-billing-20260828".into(),
+            scheduled_at: Some((now - Duration::hours(2)).to_rfc3339()),
+            started_at: Some((now - Duration::hours(2) + Duration::minutes(1)).to_rfc3339()),
+            finished_at: Some((now - Duration::hours(2) + Duration::minutes(6)).to_rfc3339()),
+            completion_count: Some(428),
+            state: "contradictory".into(),
+            source: Some("GitHub Actions".into()),
+            observed_status: Some("failed".into()),
+            source_url: Some("https://github.com/acme/payments/actions/runs/demo".into()),
+            observed_at: Some((now - Duration::hours(2) + Duration::minutes(7)).to_rfc3339()),
+            receipt_hash: Some("sha256:demo-billing-receipt".into()),
+            is_virtual: false,
+        },
+        LedgerRow {
+            job_key: "warehouse-sync".into(),
+            display_name: "Warehouse inventory sync".into(),
+            run_id: format!("missing:{}", (now - Duration::minutes(70)).timestamp()),
+            scheduled_at: Some((now - Duration::minutes(70)).to_rfc3339()),
+            started_at: None,
+            finished_at: None,
+            completion_count: None,
+            state: "missed".into(),
+            source: None,
+            observed_status: None,
+            source_url: None,
+            observed_at: None,
+            receipt_hash: Some("sha256:demo-missed-receipt".into()),
+            is_virtual: true,
+        },
+        LedgerRow {
+            job_key: "digest-mailer".into(),
+            display_name: "Customer digest mailer".into(),
+            run_id: "demo-digest-20260828".into(),
+            scheduled_at: Some((now - Duration::minutes(45)).to_rfc3339()),
+            started_at: Some((now - Duration::minutes(44)).to_rfc3339()),
+            finished_at: None,
+            completion_count: None,
+            state: "late".into(),
+            source: Some("GitHub Actions".into()),
+            observed_status: Some("pending".into()),
+            source_url: Some("https://github.com/acme/notifications/actions/runs/demo".into()),
+            observed_at: Some((now - Duration::minutes(43)).to_rfc3339()),
+            receipt_hash: Some("sha256:demo-late-receipt".into()),
+            is_virtual: false,
+        },
+        LedgerRow {
+            job_key: "invoice-export".into(),
+            display_name: "Invoice export".into(),
+            run_id: "demo-invoices-20260828".into(),
+            scheduled_at: Some((now - Duration::minutes(20)).to_rfc3339()),
+            started_at: Some((now - Duration::minutes(19)).to_rfc3339()),
+            finished_at: Some((now - Duration::minutes(16)).to_rfc3339()),
+            completion_count: Some(96),
+            state: "completed".into(),
+            source: Some("GitHub Actions".into()),
+            observed_status: Some("passed".into()),
+            source_url: Some("https://github.com/acme/exports/actions/runs/demo".into()),
+            observed_at: Some((now - Duration::minutes(15)).to_rfc3339()),
+            receipt_hash: Some("sha256:demo-invoice-receipt".into()),
+            is_virtual: false,
+        },
+    ];
+    let mut summary = HashMap::new();
+    for row in &rows {
+        *summary.entry(row.state.clone()).or_insert(0) += 1;
+    }
+    Json(LedgerResponse {
+        generated_at: now.to_rfc3339(),
+        rows,
+        summary,
+    })
+}
+
 #[derive(Serialize, FromRow)]
 struct EventReceipt {
     job_key: String,
@@ -817,6 +939,8 @@ struct EventReceipt {
     signed_timestamp: Option<String>,
     signed_body: Option<String>,
     signature: String,
+    #[serde(skip_serializing)]
+    registration_id: Option<i64>,
 }
 #[derive(Serialize, FromRow)]
 struct SnapshotReceipt {
@@ -830,6 +954,8 @@ struct SnapshotReceipt {
     signed_timestamp: Option<String>,
     signed_body: Option<String>,
     signature: String,
+    #[serde(skip_serializing)]
+    registration_id: Option<i64>,
 }
 #[derive(Serialize, FromRow)]
 struct JobReceipt {
@@ -850,9 +976,21 @@ async fn receipt(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     validate_id(&job_key, "job_key")?;
     validate_id(&run_id, "run_id")?;
-    let registration=sqlx::query_as::<_,JobReceipt>("SELECT job_key,display_name,expected_interval_seconds,grace_seconds,updated_at,signed_key_id,signed_timestamp,signed_body,signature FROM jobs WHERE job_key=?").bind(&job_key).fetch_optional(&state.pool).await?;
-    let events=sqlx::query_as::<_,EventReceipt>("SELECT job_key,event_type,scheduled_at,occurred_at,received_at,status,completion_count,signed_key_id,signed_timestamp,signed_body,signature FROM events WHERE job_key=? AND run_id=? ORDER BY id").bind(&job_key).bind(&run_id).fetch_all(&state.pool).await?;
-    let snapshots=sqlx::query_as::<_,SnapshotReceipt>("SELECT job_key,source,observed_status,source_url,observed_at,received_at,signed_key_id,signed_timestamp,signed_body,signature FROM ci_snapshots WHERE job_key=? AND run_id=? ORDER BY id").bind(&job_key).bind(&run_id).fetch_all(&state.pool).await?;
+    let events=sqlx::query_as::<_,EventReceipt>("SELECT job_key,event_type,scheduled_at,occurred_at,received_at,status,completion_count,signed_key_id,signed_timestamp,signed_body,signature,registration_id FROM events WHERE job_key=? AND run_id=? ORDER BY id").bind(&job_key).bind(&run_id).fetch_all(&state.pool).await?;
+    let snapshots=sqlx::query_as::<_,SnapshotReceipt>("SELECT job_key,source,observed_status,source_url,observed_at,received_at,signed_key_id,signed_timestamp,signed_body,signature,registration_id FROM ci_snapshots WHERE job_key=? AND run_id=? ORDER BY id").bind(&job_key).bind(&run_id).fetch_all(&state.pool).await?;
+    let registration_id = events
+        .iter()
+        .find_map(|event| event.registration_id)
+        .or_else(|| {
+            snapshots
+                .iter()
+                .find_map(|snapshot| snapshot.registration_id)
+        });
+    let registration = match registration_id {
+        Some(id) => sqlx::query_as::<_,JobReceipt>("SELECT job_key,display_name,expected_interval_seconds,grace_seconds,created_at updated_at,signed_key_id,signed_timestamp,signed_body,signature FROM job_registrations WHERE id=?")
+            .bind(id).fetch_optional(&state.pool).await?,
+        None => None,
+    };
     if events.is_empty() && snapshots.is_empty() {
         if let Some(row) = build_ledger(&state.pool)
             .await?
@@ -860,15 +998,20 @@ async fn receipt(
             .find(|row| row.is_virtual && row.job_key == job_key && row.run_id == run_id)
         {
             let derivation_basis = sqlx::query_as::<_, EventReceipt>(
-                "SELECT job_key,event_type,scheduled_at,occurred_at,received_at,status,completion_count,signed_key_id,signed_timestamp,signed_body,signature FROM events WHERE job_key=? AND event_type='start' ORDER BY scheduled_at DESC LIMIT 1",
+                "SELECT job_key,event_type,scheduled_at,occurred_at,received_at,status,completion_count,signed_key_id,signed_timestamp,signed_body,signature,registration_id FROM events WHERE job_key=? AND event_type='start' ORDER BY scheduled_at DESC LIMIT 1",
             )
             .bind(&job_key)
             .fetch_optional(&state.pool)
             .await?;
+            let derived_registration = match derivation_basis.as_ref().and_then(|event| event.registration_id) {
+                Some(id) => sqlx::query_as::<_,JobReceipt>("SELECT job_key,display_name,expected_interval_seconds,grace_seconds,created_at updated_at,signed_key_id,signed_timestamp,signed_body,signature FROM job_registrations WHERE id=?")
+                    .bind(id).fetch_optional(&state.pool).await?,
+                None => registration,
+            };
             return Ok(Json(serde_json::json!({
                 "format":"run-proof-receipt/v2", "job_key":job_key, "run_id":run_id, "exported_at":Utc::now().to_rfc3339(),
                 "derived_alert": {"job_key":row.job_key,"display_name":row.display_name,"scheduled_at":row.scheduled_at,"state":"missed","reason":"No signed start was received by the configured interval and grace deadline."},
-                "registration":registration, "derivation_basis":derivation_basis, "events":[], "ci_snapshots":[], "receipt_hash":row.receipt_hash,
+                "registration":derived_registration, "derivation_basis":derivation_basis, "events":[], "ci_snapshots":[], "receipt_hash":row.receipt_hash,
                 "receipt_hash_role":"Integrity checksum for the derived row; authenticity comes from the signed registration and derivation basis.",
                 "verification":"This alert is derived from the signed registration and the job's last signed start schedule. Verify each signed_body byte-for-byte as HMAC-SHA256(signed_timestamp + '.' + signed_body)."
             })));

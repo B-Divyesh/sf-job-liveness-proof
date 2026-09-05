@@ -1,0 +1,65 @@
+[
+  {
+    "id": "demo-ledger",
+    "claim": "Shows a populated sample ledger with missed, late, contradictory, and completed runs",
+    "where": "landing first action and /demo",
+    "test": "npm run test:claims -- --grep @claim:demo-ledger",
+    "sandbox": "fresh browser context; enter /demo from the landing action; inspect the four sample rows and reset the demo"
+  },
+  {
+    "id": "csv-export",
+    "claim": "Exports the ledger as CSV",
+    "where": "ledger toolbar and README",
+    "test": "npm run test:claims -- --grep @claim:csv-export",
+    "sandbox": "fresh /demo; download the CSV; assert its header and one row for each sample run"
+  },
+  {
+    "id": "sample-receipt",
+    "claim": "Exports a receipt for each shown run",
+    "where": "ledger receipt actions",
+    "test": "npm run test:claims -- --grep @claim:sample-receipt",
+    "sandbox": "fresh /demo; export the selected sample receipt and inspect its run identity"
+  },
+  {
+    "id": "offline-reload",
+    "claim": "Works offline after the first visit",
+    "where": "README and offline state",
+    "test": "npm run test:claims -- --grep @claim:offline-reload",
+    "sandbox": "dedicated fresh browser context; visit /demo, wait for the service worker, set the context offline, and reload"
+  },
+  {
+    "id": "no-tracking",
+    "claim": "Has no analytics or tracking",
+    "where": "privacy page and README",
+    "test": "npm run test:claims -- --grep @claim:no-tracking",
+    "sandbox": "fresh /demo; record requests through load, reset, and export; assert every request is same-origin"
+  },
+  {
+    "id": "signed-evidence",
+    "claim": "Records signed event evidence",
+    "where": "landing, README, and receipts",
+    "test": "cargo test --test api signed_events_create_a_contradictory_receipt -- --exact",
+    "sandbox": "fresh in-memory receiver; sign register, start, finish, and CI records; recompute every exported HMAC"
+  },
+  {
+    "id": "no-job-payloads",
+    "claim": "Does not store job payloads",
+    "where": "landing, privacy page, and README",
+    "test": "cargo test --test api no_job_payload_fields_are_rejected -- --exact",
+    "sandbox": "fresh in-memory receiver; submit a correctly signed unknown payload field and assert rejection"
+  },
+  {
+    "id": "receipt-history",
+    "claim": "Keeps each completed receipt tied to its original schedule",
+    "where": "README",
+    "test": "cargo test --test api reregistering_a_job_does_not_change_a_completed_receipts_intent_or_hash -- --exact",
+    "sandbox": "fresh in-memory receiver; complete a run, register a new schedule, and compare original receipt content and hash"
+  },
+  {
+    "id": "retention-setting",
+    "claim": "Lets the operator set evidence retention",
+    "where": "privacy page and README",
+    "test": "cargo test --test api configuration_reports_retention_setting -- --exact",
+    "sandbox": "fresh receiver with a configured retention value; read the public configuration response"
+  }
+]

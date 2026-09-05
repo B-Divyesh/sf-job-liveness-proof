@@ -1,20 +1,28 @@
 # Run Proof
 
-Run Proof is a compact, self-hosted evidence ledger for cron jobs and queue workers. It records signed schedule, start, finish, completion-count, and CI-source observations, then calls out missed, late, failed, and contradictory runs on one page. It is for small application teams who need stronger evidence than URL uptime or a green status rollup.
+Track scheduled jobs that ran.
 
-It does **not** execute jobs, retain job payloads, replace CI, or route alerts.
+Run Proof is for small app teams with cron jobs and queue workers.
+It records schedule, start, finish, and CI observations.
+The ledger shows missed, late, failed, and conflicting runs.
 
-## What ships
+Try the isolated sample at `/demo`.
+It shows a populated ledger without reading or writing your data.
 
-- Rust/axum receiver with SQLite, HMAC-SHA256 verification, clock-skew checks, forwarded-client rate limiting on every API route, structured logs, and graceful shutdown.
-- `run-proof` CLI for job registration, start/finish receipts, and CI snapshots.
-- Responsive ledger with per-run JSON receipts, full CSV export, last-known offline view, and explicit empty/error/offline states.
-- Configurable retention and no application payload field in any ingest schema.
-- Run Proof Plus, a $29 one-time license that unlocks a saved operational view and supports maintenance. Core evidence, retention configuration, and all exports remain free.
+## What it does
+
+- Receives HMAC-signed job registration, start, finish, and CI records.
+- Stores evidence in SQLite and keeps exact signed request bytes.
+- Exports each run as a JSON receipt and the ledger as CSV.
+- Keeps completed receipts tied to their original schedule registration.
+- Retains no job payload fields.
+- Shows a last-known ledger after an offline reload.
+
+It does not execute jobs, route alerts, process queues, or replace CI.
 
 ## Run locally
 
-Prerequisites: Node 22+, Rust 1.88+, and SQLite development libraries.
+Install Node 22+, Rust 1.88+, and SQLite development libraries.
 
 ```sh
 npm ci
@@ -22,11 +30,25 @@ npm run build
 cargo run --bin run-proof-server
 ```
 
-Open <http://localhost:8080>. For frontend hot reload, keep the server running and use `npm run dev` in another terminal; Vite proxies `/api` and `/health` to port 8080.
+Open <http://localhost:8080>.
+Use `npm run dev` in another terminal for frontend hot reload.
+
+## Try the demo
+
+Open <http://localhost:8080/demo>.
+The demo has four realistic job records.
+It uses `GET /api/v1/demo/ledger`, which creates sample data in memory.
+It never reads or writes the production SQLite ledger.
+
+The banner stays visible in demo mode.
+Choose **Reset demo** to clear `demo:run-proof:last-ledger` and reload samples.
+Choose **Start for real** to return to the real ledger.
+See [`.factory/demo.md`](.factory/demo.md) for the full sandbox contract.
 
 ## Connect a job
 
-Build the CLI with `cargo build --release --bin run-proof`, or use the CLI copied into the container:
+Build the CLI with `cargo build --release --bin run-proof`.
+Set a receiver URL and shared secret first.
 
 ```sh
 export RUN_PROOF_URL='http://localhost:8080'
@@ -39,50 +61,62 @@ run-proof snapshot billing-sweep billing-1700000000 \
   --source 'GitHub Actions' --status failed --source-url 'https://github.com/example/actions/runs/1'
 ```
 
-The CLI signs `unix_timestamp + "." + exact_JSON_body` with HMAC-SHA256 and sends `X-Run-Proof-Key`, `X-Run-Proof-Timestamp`, and `X-Run-Proof-Signature: v1=<hex>`. Run receipts are scoped by both job and run (`/api/v1/jobs/:job_key/runs/:run_id/receipt`) and retain those exact signed bytes, timestamp, key ID, and signature so the HMAC can be independently recomputed. Duplicate start/finish events return `409`; timestamps outside `CLOCK_SKEW_SECONDS` return `400`.
+The CLI signs `unix_timestamp + "." + exact_JSON_body` with HMAC-SHA256.
+Receipts include those exact signed bytes, timestamp, key ID, and signature.
+You can recompute every HMAC independently.
+Duplicate start or finish records return `409`.
+Out-of-window timestamps return `400`.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port |
-| `DATABASE_URL` | `sqlite://run-proof.db?mode=rwc` | SQLite URL; mount its directory persistently |
-| `RUN_PROOF_SECRET` | generated and persisted | Shared signing secret, minimum 32 characters; generated with the OS CSPRNG on first boot when unset |
-| `RUN_PROOF_KEY_ID` | `default` | Public key identifier expected from senders |
-| `RETENTION_DAYS` | `30` | Evidence retention, 1–3650 days; cleanup runs at startup |
-| `CLOCK_SKEW_SECONDS` | `300` | Accepted clock difference, 30–3600 seconds |
-| `RUST_LOG` | receiver defaults | `tracing` filter for JSON logs |
+| `DATABASE_URL` | local SQLite | SQLite URL; mount its directory durably |
+| `RUN_PROOF_SECRET` | generated | Shared signing secret; at least 32 characters |
+| `RUN_PROOF_KEY_ID` | `default` | Key identifier expected from senders |
+| `RETENTION_DAYS` | `30` | Evidence retention; 1–3650 days |
+| `CLOCK_SKEW_SECONDS` | `300` | Accepted clock difference; 30–3600 seconds |
 
-Back up SQLite before upgrades. Rotate a compromised secret on the receiver and all senders together. Run behind TLS in production. Production must mount the database directory durably. Because SQLite is a single-node datastore, run exactly one application replica; use PostgreSQL instead before scaling horizontally.
+The default container uses `/data/run-proof.db` when `/data` exists.
+It also stores its generated secret under `/data`.
+Mount `/data` on durable storage.
+Use exactly one replica with SQLite.
+Use PostgreSQL before horizontal scaling.
 
 ## Test and build
 
 ```sh
-npm test              # web + Rust tests
-npm run build         # reproducible frontend output in dist/
-npm run check         # TypeScript + clippy
-docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t run-proof .
+npm test
+npm run build
+npm run check
 RUN_PROOF_URL=http://localhost:8080 ./scripts/load-smoke.sh
 ```
 
-The load smoke sends 100 concurrent health requests. Integration tests cover a full signed job → start → finish → contradictory CI observation → receipt path, invalid signatures, rejected payload fields, and health metadata.
+Run each public claim from a clean checkout with the command in
+[`.factory/claims.json`](.factory/claims.json).
 
-## Container deployment
+The release command is `scripts/deploy-container.sh <full-commit-sha>`.
+It builds the image and reasserts the Azure Files `/data` mount.
+It also sets both replica bounds to one.
 
 ```sh
-docker run --rm -p 8080:8080 \
-  -v run-proof-data:/data run-proof
+npm run verify:deployment -- <full-commit-sha>
 ```
 
-The image runs as UID/GID `10001`, starts with only `PORT` (default `8080`), serves frontend and API on `0.0.0.0:$PORT`, and stores SQLite plus a generated signing secret under `/data`. Mount `/data` on durable storage and keep the deployment at one replica; the generated secret is atomically created and reused across restarts and rolling revisions. Build it with the full commit SHA command above so `/health` reports the deployed commit. The factory owns infrastructure, DNS, TLS, and product registration.
+## Privacy and purchase
 
-The factory release command is `scripts/deploy-container.sh <full-commit-sha>`. It builds the work-order Dockerfile in ACR and atomically reasserts the existing `data-job-liveness-proof` Azure Files mount plus `minReplicas=1` / `maxReplicas=1` on every rollout. `npm run verify:deployment -- <sha>` fails if either the durable topology or live build identity drifts.
+Run Proof has no analytics, tracking, third-party fonts, or runtime CDN scripts.
+The browser stores a last-known ledger, an optional saved view, and a license token.
+See `/privacy` and `/terms` in the running app.
 
-## Privacy, purchases, and license
+Run Proof Plus is a $29 one-time license for saved operational views.
+Core ingest and exports stay free.
+Sociobot/Dodo is the merchant of record.
+The currently advertised checkout needs factory billing registration before purchase works.
 
-No analytics, tracking, third-party fonts, or runtime CDN scripts are included. The browser stores only a last-known ledger, optional saved view, and optional Sociobot license. Checkout uses the Sociobot billing API; once-daily verification is relayed by this receiver to the same API so it shares the receiver's abuse controls. Dodo/Sociobot is merchant of record. See `/privacy` and `/terms` in the running app.
-
-Artwork was generated for this repository using the factory image model. Its prompt, checksum, and provenance are in [`.factory/design.md`](.factory/design.md) and [`assets/src/run-proof-diorama.json`](assets/src/run-proof-diorama.json).
+The original paper-desk artwork was generated for this repository.
+See [`.factory/design.md`](.factory/design.md) for its prompt and provenance.
 
 ## License
 

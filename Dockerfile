@@ -1,4 +1,6 @@
 ARG BUILD_SHA=development
+ARG GIT_SHA=development
+ARG SOURCE_COMMIT=development
 
 FROM node:22-alpine AS frontend
 WORKDIR /build
@@ -6,8 +8,10 @@ COPY package.json package-lock.json tsconfig.json vite.config.ts ./
 COPY frontend ./frontend
 RUN npm ci && npm run build
 
-FROM rust:1.88-bookworm AS backend
-ARG BUILD_SHA
+FROM rust:1-slim AS backend
+ARG BUILD_SHA=development
+ARG GIT_SHA=development
+ARG SOURCE_COMMIT=development
 ENV BUILD_SHA=${BUILD_SHA}
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

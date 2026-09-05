@@ -60,6 +60,7 @@ async fn json(response: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
+// @claim:signed-evidence
 async fn signed_events_create_a_contradictory_receipt() {
     let app = app().await;
     let response=app.clone().oneshot(signed("/api/v1/jobs",json!({"job_key":"billing","display_name":"Billing sweep","expected_interval_seconds":3600,"grace_seconds":60}))).await.unwrap();
@@ -166,6 +167,77 @@ async fn receipts_are_scoped_by_job_when_run_ids_match() {
             .iter()
             .all(|event| event["job_key"] == job));
     }
+}
+
+#[tokio::test]
+// @claim:receipt-history
+async fn reregistering_a_job_does_not_change_a_completed_receipts_intent_or_hash() {
+    let app = app().await;
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                "/api/v1/jobs",
+                json!({"job_key":"billing-sweep","display_name":"Billing sweep","expected_interval_seconds":60,"grace_seconds":30}),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                "/api/v1/runs/start",
+                json!({"job_key":"billing-sweep","run_id":"historic-run","scheduled_at":Utc::now().to_rfc3339(),"started_at":null}),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                "/api/v1/runs/finish",
+                json!({"job_key":"billing-sweep","run_id":"historic-run","status":"success","completion_count":0,"finished_at":null}),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let receipt_path = "/api/v1/jobs/billing-sweep/runs/historic-run/receipt";
+    let before = json(
+        app.clone()
+            .oneshot(Request::get(receipt_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                "/api/v1/jobs",
+                json!({"job_key":"billing-sweep","display_name":"Billing sweep hourly","expected_interval_seconds":3600,"grace_seconds":300}),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    let after = json(
+        app.clone()
+            .oneshot(Request::get(receipt_path).body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(before["receipt_hash"], after["receipt_hash"]);
+    assert_eq!(after["registration"]["display_name"], "Billing sweep");
+    assert_eq!(after["registration"]["expected_interval_seconds"], 60);
+    assert_eq!(after["registration"]["grace_seconds"], 30);
 }
 
 #[tokio::test]
@@ -366,7 +438,8 @@ async fn license_verification_is_same_origin_proxied_no_store_and_rate_limited()
 }
 
 #[tokio::test]
-async fn invalid_signature_and_unknown_payload_are_rejected() {
+// @claim:no-job-payloads
+async fn no_job_payload_fields_are_rejected() {
     let app = app().await;
     let request = Request::post("/api/v1/jobs")
         .header("content-type", "application/json")
@@ -378,6 +451,89 @@ async fn invalid_signature_and_unknown_payload_are_rejected() {
     );
     let response=app.oneshot(signed("/api/v1/jobs",json!({"job_key":"safe","display_name":"Safe","expected_interval_seconds":60,"grace_seconds":0,"payload":{"secret":"must not persist"}}))).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+// @claim:retention-setting
+async fn configuration_reports_retention_setting() {
+    let pool = connect("sqlite::memory:").await.unwrap();
+    let app = router(
+        AppState::new(
+            pool,
+            SECRET.into(),
+            "test".into(),
+            91,
+            300,
+            "test-sha".into(),
+        ),
+        None,
+    );
+    let config = json(
+        app.oneshot(Request::get("/api/v1/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(config["retention_days"], 91);
+    assert_eq!(config["payload_storage"], false);
+}
+
+#[tokio::test]
+async fn demo_ledger_is_seeded_without_reading_or_writing_the_real_ledger() {
+    let app = app().await;
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                "/api/v1/jobs",
+                json!({"job_key":"real-job","display_name":"Real job","expected_interval_seconds":3600,"grace_seconds":60}),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(signed(
+                "/api/v1/runs/start",
+                json!({"job_key":"real-job","run_id":"real-run","scheduled_at":Utc::now().to_rfc3339(),"started_at":null}),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+
+    let demo = json(
+        app.clone()
+            .oneshot(
+                Request::get("/api/v1/demo/ledger")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let sample_rows = demo["rows"].as_array().unwrap();
+    assert_eq!(sample_rows.len(), 4);
+    assert!(sample_rows.iter().all(|row| row["job_key"] != "real-job"));
+    assert!(sample_rows
+        .iter()
+        .any(|row| row["state"] == "contradictory"));
+    assert!(sample_rows.iter().any(|row| row["state"] == "missed"));
+
+    let real = json(
+        app.oneshot(Request::get("/api/v1/ledger").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(real["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["job_key"] == "real-job"));
 }
 
 #[tokio::test]
